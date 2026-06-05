@@ -112,13 +112,32 @@ if __name__ == "__main__":
     #Later add a seed function to change what f(x) is for each case
     parser.add_argument('--WidthModifyer', type = float, help='Modifyer of the width of each hidden layer, for example' \
     'say our initial width is 10, and we set our widthmodifyer = 0.1, then the width of each hidden layer will decrease by 10% ', default=0.1)
-    parser.add_argument('--Epochs',type=int, help='Determines the number of training epochs', default = 3000)
+    parser.add_argument('--Epochs',type=int, help='Determines the number of training epochs', default = 500)
     parser.add_argument('--STD',type=float, help='Determines the standard deviation (width) of the normal distribution for the hidden layers weights', default = 1.0)
     args = parser.parse_args()
 
-    model = MultiLayerNet(args.InputSize,args.HiddenLayerDepth,args.HiddenLayerWidth,args.OutputSize,args.std)
+    model = MultiLayerNet(args.InputSize,args.HiddenLayerDepth,args.HiddenLayerWidth,args.OutputSize,args.STD)
+
+    activation_history = {i: [] for i in range(len(model.hidden_layers)+1)}
+    """Creates a dictionary of lists corresponding to each layer, where we will store the activation history to calculate finite differences"""
+    def make_hook(layer_id):
+        """This NEEDS to be a nested function to safely pass the layer_id value to the hook function, which only ever takes the module, input and output as function inputs"""
+        def hook(module, input, output):
+            activation_history[layer_id].append(output.detach().abs().mean().item())
+            #Appends the absolute value of the mean output of the layer to the corresponding activation history list
+        return hook
+
+    hooks =[] 
+
+    for i, layer in enumerate(model.hidden_layers): #Note this does not include the output layer
+        hooks.append(layer.register_forward_hook(make_hook(i)))
+    
+    #now need to add one for the output layer
+    hooks.append(model.output_layer.register_forward_hook(make_hook(len(model.hidden_layers)))) #This will be the last output hook
+    
 
 
+    
 
     """Training the model"""
     optimiser  = torch.optim.SGD(model.parameters(), lr = args.lr)
@@ -153,5 +172,25 @@ if __name__ == "__main__":
 
         if epoch %100 ==0:
             print(f'Finished epoch {epoch}')
+    
+    #After training we need to remove the hooks
+    for h in hooks:
+        h.remove()
+    
+    """Now save all the activation history to a file"""
+    df = pd.DataFrame(activation_history)
+    df.to_csv(r"C:\Users\Logan\Downloads\SummerWork\activation_history.csv",index = False)
+
+    #Now need to calculate the derivatives
+    derivatives = {}
+    for i in range(len(model.hidden_layers)+1):
+        derivatives[i] = abs(np.diff(activation_history[i],1))
+    
+    """Now to plot these results for a singular model"""
+    for k in range(len(derivatives)):
+        plt.plot(derivatives[k], label = f'Layer {k}')
+    plt.show()
+
+
 
 
