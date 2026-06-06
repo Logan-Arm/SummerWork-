@@ -131,7 +131,7 @@ if __name__ == "__main__":
         def make_hook(layer_id):
             """This NEEDS to be a nested function to safely pass the layer_id value to the hook function, which only ever takes the module, input and output as function inputs"""
             def hook(module, input, output):
-                activation_history[layer_id].append(output.detach().abs().mean().item())
+                activation_history[layer_id].append(output.detach().abs())
                 #Appends the absolute value of the mean output of the layer to the corresponding activation history list
             return hook
 
@@ -192,7 +192,11 @@ if __name__ == "__main__":
                 print(f'Finished epoch {epoch}')
         derivatives_sq = {}
         for i in range(len(model.hidden_layers)+1):
-            derivatives_sq[i] = abs(np.diff(activation_history[i],1))**2
+            stacked = torch.stack(activation_history[i]).numpy()
+            time_deriv_sq = np.diff(stacked,1,0)**2 #First derivative of stacked along the 0th(epoch) axis
+            derivatives_sq[i]=time_deriv_sq.mean(axis=(1,2))
+    
+
 
         for i in range(num_layers):
             ensemble_derivs_sq[i].append(derivatives_sq[i])
@@ -210,7 +214,7 @@ if __name__ == "__main__":
         
         # Single line with shaded uncertainty band
         ax.plot(epochs_axis, mean, label=f'Layer {k}')
-        ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.2)
+        ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
 
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Squared Activation Derivative')
