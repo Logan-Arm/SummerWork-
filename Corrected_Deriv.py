@@ -7,7 +7,7 @@ import torch.nn as nn
 from sklearn.model_selection import train_test_split
 import math as m
 import argparse
-
+from joblib import Parallel, delayed
 """Recall our setup, we have an input layer X, and an output layer Y, the data we are creating is going to be Y =f(x) where f is some function.
 Lets start simple at first and have f(x) = sinh(x)
 """
@@ -88,7 +88,7 @@ class MultiLayerNet(nn.Module): #nn.module is the base class for all neural netw
 
         for layer in self.hidden_layers:
             nn.init.normal_(layer.weight, mean = 0, std = std)
-            #nn.init.zeros_(layer.bias)#Confirm that we want zero for the biases
+            nn.init.zeros_(layer.bias)#Confirm that we want zero for the biases
             nn.init.normal_(layer.bias,mean = 0, std= std)
         """IMPORTANT Note TO SELF:  the _ at the end of each nn.init.shape creates an IN PLACE change, so we are actually editing the layers"""
     
@@ -271,7 +271,7 @@ if __name__ == "__main__":
             #axis 1 = batch/data
             #axis 2 = neuron
 
-            time_deriv = np.abs(np.diff(stacked, 1, 0)) #Takes first derivative along the epoch axis
+            time_deriv = np.diff(stacked, 1, 0) #Takes first derivative along the epoch axis
 
             print(f'time_deriv shape: {time_deriv.shape}') #Sanity check
             
@@ -314,8 +314,7 @@ if __name__ == "__main__":
         """
 
         #Take the mean value with respect to the ensembles
-        ens_mean = np.mean(stacked_ensemble, axis = 0) #New dimensionality is [epochs-1,batch, neurons]
-        ens_std = np.std(ens_mean, axis = 0)/args.EnsembleNum
+        ens_mean = np.abs(np.mean(stacked_ensemble, axis = 0)) #New dimensionality is [epochs-1,batch, neurons]
 
         """COme back to the uncertainty, not totally sure how to calculate it"""
 
@@ -326,13 +325,21 @@ if __name__ == "__main__":
         #Now have something of shape [epochs -1, neurons]
 
 
-        #Want to calculate the bootstrap uncertainty for this list
-        for j in range(ensemble_means_neurons.shape[0]):
-            ensemble_uncertainty[i].append(Bootstrap_Analysis(ensemble_means_neurons[j,:]))
+        # #Want to calculate the bootstrap uncertainty for this list
+        # for j in range(ensemble_means_neurons.shape[0]):
+        #     ensemble_uncertainty[i].append(Bootstrap_Analysis(ensemble_means_neurons[j,:]))
         """Above is commented out initially to simply get a plot without errors to save computation time"""
 
         ensemble_means[i] = np.mean(ensemble_means_neurons,axis =1) #Now averaging over all the neurons
-        ensemble_uncertainty[i] = np.array(ensemble_uncertainty[i]) #Need it to be a numpy array
+        results = Parallel(n_jobs= -1)(delayed(Bootstrap_Analysis)(ensemble_means_neurons[j,:]) for j in range(ensemble_means_neurons.shape[0])
+                                       )
+        ensemble_uncertainty[i] = np.array(results)
+       
+       
+       
+       
+       
+        #ensemble_uncertainty[i] = np.array(ensemble_uncertainty[i]) #Need it to be a numpy array
         #What is remaining is a list of dimensionality [epochs-1, means], this is the appended to the ith component of the ensemble_means dictionary
 
 
