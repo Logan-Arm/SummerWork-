@@ -88,13 +88,17 @@ class MultiLayerNet(nn.Module): #nn.module is the base class for all neural netw
 
         for layer in self.hidden_layers:
             nn.init.normal_(layer.weight, mean = 0, std = std)
-            nn.init.zeros_(layer.bias)#Confirm that we want zero for the biases
+            #nn.init.zeros_(layer.bias)#Confirm that we want zero for the biases
+            nn.init.normal_(layer.bias,mean = 0, std= std)
         """IMPORTANT Note TO SELF:  the _ at the end of each nn.init.shape creates an IN PLACE change, so we are actually editing the layers"""
     
 
         ###Output layer is not included in self.hidden_layers so need to handle that one externally
         nn.init.normal_(self.output_layer.weight,mean = 0, std = std)
-        nn.init.zeros_(self.output_layer.bias)
+        #nn.init.zeros_(self.output_layer.bias)
+
+        nn.init.normal_(self.output_layer.bias, mean = 0, std= std)
+
     def forward(self,x):
         #pass input through the hidden layer applying sigmoid activation
         for layer in self.hidden_layers:
@@ -142,7 +146,31 @@ if __name__ == "__main__":
     parser.add_argument('--STD',type=float, help='Determines the standard deviation (width) of the normal distribution for the hidden layers weights', default = 0.3)
     parser.add_argument('--EnsembleNum', type = int, help= ' Determines the number of models to create for the purposes of ensemble averages', default= 10)
     parser.add_argument('--Performances', type = int, help='Determines the number of printouts of model performance desired', default=4)
+    parser.add_argument('--Bootstraps', type= int, help='Determines the number of bootstraps to calculate for error propagation', default=100)
     args = parser.parse_args()
+
+
+
+    def Bootstrap_Analysis(list):
+        
+        resampled_means = []
+        for i in range(args.Bootstraps):
+            resampled_vals = np.random.choice(list,size = len(list), replace = True) #Generates a resampled list of same size as inputted list
+            inst_resampled_mean = np.mean(resampled_vals)
+            resampled_means.append(inst_resampled_mean)
+        new_mean = np.mean(resampled_means)
+        new_mean_of_sq = np.mean(np.array(resampled_means)**2) #need to convert to an np array before squaring
+        
+        #Floating point errors, leading to runtime problems, need to implement a maximum value instead
+        #error = np.sqrt(new_mean_of_sq-new_mean**2) #Sigma = sqrt[<X^2>-<X>^2]
+    
+        error = np.sqrt(max(0, new_mean_of_sq - new_mean**2))
+    
+        return error
+
+
+
+
 
     #Need to create a loop here to iterate over and create ensemble data
     print(X_test_sorted)
@@ -171,7 +199,9 @@ if __name__ == "__main__":
         def make_hook(layer_id):
             """This NEEDS to be a nested function to safely pass the layer_id value to the hook function, which only ever takes the module, input and output as function inputs"""
             def hook(module, input, output):
-                activation_history[layer_id].append(output.detach().abs())#Re-added absolute value
+
+                activation_history[layer_id].append(output.detach()) #Confirm that there should be NO ABSOLUTE VALUE HERE
+                
                 #Appends the absolute value of the output of the layer to the corresponding activation history list
             return hook
 
@@ -241,7 +271,10 @@ if __name__ == "__main__":
             #axis 1 = batch/data
             #axis 2 = neuron
 
-            time_deriv = np.diff(stacked, 1, 0) #Takes first derivative along the epoch axis
+            time_deriv = np.abs(np.diff(stacked, 1, 0)) #Takes first derivative along the epoch axis
+
+            print(f'time_deriv shape: {time_deriv.shape}') #Sanity check
+            
             ensemble_derivs[i].append(time_deriv)
             #appends the layer information to the corresponding layer list in the ensemble_derivs dictionary
             #New dimensionality would be the following:
@@ -263,8 +296,16 @@ if __name__ == "__main__":
     ensemble_uncertainty = {i:[] for i in range(num_layers)}
 
 
+    #Sanity checker
+    for k in range(num_layers):
+            print(f'Layer {k}: ensemble_derivs[{k}] has {len(ensemble_derivs[k])} entries, first entry shape: {ensemble_derivs[k][0].shape}')
+        
 
     for i in range(num_layers):
+
+
+        print(f"On ensemble calculations for layer {i}")
+
         stacked_ensemble = np.stack(ensemble_derivs[i], axis = 0) #Shape is now [ensemble, epochs-1, neurons]
         """What is going on in above line:
         We are taking the FIRST ELEMENT of the ensemble_derivs, recall from line 248 that this corresponds to selecting a specific layer
@@ -280,8 +321,19 @@ if __name__ == "__main__":
 
         #ens_mean_sq = ens_mean**2 #Values should (in theory) scale to 1/n, so to square it is just going to shrink it immensely. work with absolute vals instead
 
-        #Now take the mean over the remaining axes, i.e., batches and neurons
-        ensemble_means[i] = ens_mean.mean(axis = (1,2))
+        #Now take the mean over the remaining axes, i.e., batches first, then calculate error, then take remaining mean
+        ensemble_means_neurons = ens_mean.mean(axis = 1)
+        #Now have something of shape [epochs -1, neurons]
+
+
+        #Want to calculate the bootstrap uncertainty for this list
+        for j in range(ensemble_means_neurons.shape[0]):
+            ensemble_uncertainty[i].append(Bootstrap_Analysis(ensemble_means_neurons[j,:]))
+        """Above is commented out initially to simply get a plot without errors to save computation time"""
+
+        ensemble_means[i] = np.mean(ensemble_means_neurons,axis =1) #Now averaging over all the neurons
+        ensemble_uncertainty[i] = np.array(ensemble_uncertainty[i]) #Need it to be a numpy array
+        #What is remaining is a list of dimensionality [epochs-1, means], this is the appended to the ith component of the ensemble_means dictionary
 
 
         
@@ -303,7 +355,7 @@ if __name__ == "__main__":
         ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
 
     ax.set_xlabel('Epoch')
-    ax.set_ylabel('Squared Pre-Activation Derivative')
+    ax.set_ylabel('Pre-Activation Derivative')
     ax.set_title('Finite Difference of Layer Pre-Activations')
     ax.legend()
     plt.tight_layout()
@@ -326,7 +378,7 @@ if __name__ == "__main__":
         ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
 
     ax.set_xlabel('Epoch')
-    ax.set_ylabel('Squared Pre-Activation Derivative')
+    ax.set_ylabel('Pre-Activation Derivative')
     ax.set_title('Finite Difference of Layer Pre-Activations')
     ax.legend()
     plt.tight_layout()
