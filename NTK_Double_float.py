@@ -89,6 +89,7 @@ def NTK_calc(model, X):
         """
         return functional_call(model, params, (x.unsqueeze(0),)).squeeze(0)
     J = vmap(jacrev(fnet_single),(None,0))(params,X)
+   
     """Vmap vectorises/parallelises the function/calculation being called, in this case jacrev of fnet_single
     jacrev calls the jacobian with respect to the inputs first argument, which in the case of fnet_single is params
     The (None,0) tells vmap which dimensionality to parallelise along, as seen by the function inputs i.e., the (params,X) at the end of line 92 
@@ -103,6 +104,7 @@ def NTK_calc(model, X):
     layer_1_weight = [N,10,10]
     layer_1_bias = [N,10]
     """
+
     #We now need to flatten these arrays
     J_flat = torch.cat([j.flatten(1) for j in J.values()], dim=1)
     """
@@ -132,8 +134,8 @@ class MultiLayerNet(nn.Module): #nn.module is the base class for all neural netw
 
         """Since we have a variable number of hidden layers, it is best to create a list in itialisation"""
 
-        self.hidden_layers = nn.ModuleList()
 
+        self.hidden_layers = nn.ModuleList()
 
         #Create the initial layer
         self.hidden_layers.append(nn.Linear(input_size,width))
@@ -141,36 +143,30 @@ class MultiLayerNet(nn.Module): #nn.module is the base class for all neural netw
         for i in range(num_layers-1): 
             self.hidden_layers.append(nn.Linear(width,width))
 
-
         self.output_layer = nn.Linear(width, output_size)
-
         """What above does
         Maps initial values onto the first hidden layer Init--> Hidden
-
         Creates all other hidden layers
-
         Maps hidden to output hidden --> Output
-        
         """
-
+        self.layer_widths = []
         for layer in self.hidden_layers:
             nn.init.normal_(layer.weight, mean = 0, std = std)
             nn.init.normal_(layer.bias,mean = 0, std= std)
+            self.layer_widths.append(layer.out_features)#Appending widths of the layer
         """IMPORTANT Note TO SELF:  the _ at the end of each nn.init.shape creates an IN PLACE change, so we are actually editing the layers"""
     
 
         ###Output layer is not included in self.hidden_layers so need to handle that one externally
         nn.init.normal_(self.output_layer.weight,mean = 0, std = std)
         nn.init.normal_(self.output_layer.bias, mean = 0, std= std)
+        self.layer_widths.append(self.output_layer.out_features) #appending the last layer to the widths array
 
     def forward(self,x):
-        #pass input through the hidden layer applying sigmoid activation
+        #pass input through the hidden layer applying tanh activation
         for layer in self.hidden_layers:
             x= torch.tanh(layer(x))
         y_pred = self.output_layer(x)
-
-
-
         """What above line is doing
         
         Calling the layer as a function and passing x through it
@@ -192,8 +188,11 @@ def criterion(y_pred, y_true):
     return torch.mean((y_pred-y_true)**2)
     #Note, in the NN_EFT notes there is a 1/2 which is in front of this term, this is not necessary here as the torch autograd factors this in automatically
 
-
-
+"""Creating a function to remove all hooks from the model"""
+def remove_hooks(hooks):
+    for hook in hooks:
+        hook.remove()
+    hooks.clear
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -211,6 +210,7 @@ if __name__ == "__main__":
     parser.add_argument('--EnsembleNum', type = int, help= ' Determines the number of models to create for the purposes of ensemble averages', default= 10)
     parser.add_argument('--Performances', type = int, help='Determines the number of printouts of model performance desired', default=4)
     parser.add_argument('--Bootstraps', type= int, help='Determines the number of bootstraps to calculate for error propagation', default=100)
+    parser.add_argument('--AlignmentInterval', type = int, help='Determines how frequently to calculate the NTK alignment', default=100)
     args = parser.parse_args()
 
 
@@ -224,9 +224,13 @@ if __name__ == "__main__":
     member here, then average it to create the average NTK at time = 0
     """
 
+    Y_vector = Y_train.numpy()
+    normalising_const = np.dot(Y_vector,Y_vector.T)#Normalising constant to be used in alignment calculations
 
-    """Attempting to use more numpy arrays as opposed to dictionaries, hope to make it more clear
-    """
+    #Alignment array needs to have following dimensionality [ensemblenum, epoch]
+    alignment_array = np.zeros((args.EnsembleNum,args.Epochs//args.AlignmentInterval))
+
+
     loss_array = np.zeros((args.Epochs,args.EnsembleNum)) #Creates an array of size [Epochs, Ensemble] to store all loss information
     epochs = args.Epochs
 
@@ -236,12 +240,8 @@ if __name__ == "__main__":
     step=int(args.Epochs/args.Performances)
 
     for j in range(args.EnsembleNum):
-
         print(f'On model # {j}')
-
         model = MultiLayerNet(args.InputSize,args.HiddenLayerDepth,args.HiddenLayerWidth,args.OutputSize,args.STD).double()
-        #Now we calculate the initial NTK
-        NTK_Zero_Matrix.append((NTK_calc(model,X_train)).numpy())
         if j==0:
             print(model)
         activation_history = {i: [] for i in range(len(model.hidden_layers)+1)}
@@ -249,12 +249,8 @@ if __name__ == "__main__":
         def make_hook(layer_id):
             """This NEEDS to be a nested function to safely pass the layer_id value to the hook function, which only ever takes the module, input and output as function inputs"""
             def hook(module, input, output):
-
-                activation_history[layer_id].append(output.detach()) #Confirm that there should be NO ABSOLUTE VALUE HERE
-                
-                #Appends the absolute value of the output of the layer to the corresponding activation history list
+                activation_history[layer_id].append(output.detach())                
             return hook
-
         hooks =[] 
 
         """Note, while the hooks below are registered forward and not register_forward_pre_hook, the model is set up to calculate the layers weighting and biases upon the data
@@ -274,18 +270,42 @@ if __name__ == "__main__":
         i.e.,  (no random sampling)"""
 
         for epoch in range(epochs):
+
+            
+            if epoch==0: #appends the first matrix
+                remove_hooks(hooks)
+                ntk_matrix = NTK_calc(model,X_train).numpy()
+                NTK_Zero_Matrix.append(ntk_matrix)
+                for i, layer in enumerate(model.hidden_layers):
+                    hooks.append(layer.register_forward_hook(make_hook(i)))
+                hooks.append(model.output_layer.register_forward_hook(make_hook(len(model.hidden_layers))))
+
+
+            if epoch%100==0: #Only include NTK calculations every 100 epochs
+                #print(f"Currently on epoch {epoch}")
+
+                #Removing hooks
+
+                remove_hooks(hooks)
+                ntk_matrix = NTK_calc(model,X_train).numpy()
+                
+                alignment_item = np.dot(Y_vector,ntk_matrix)
+                alignment_array[j,epoch//args.AlignmentInterval] = np.dot(alignment_item,Y_vector.T)/normalising_const
+                
+                #Re-adding hooks
+                for i, layer in enumerate(model.hidden_layers): #Note this does not include the output layer
+                    hooks.append(layer.register_forward_hook(make_hook(i)))
+                hooks.append(model.output_layer.register_forward_hook(make_hook(len(model.hidden_layers)))) #This will be the last output hook
+
+            #Start of training loop
             model.train()
-
             y_pred = model(X_train)
-
             loss = criterion(y_pred.squeeze(),Y_train)
-
             loss.backward()
-            
             optimiser.step()
-            
             optimiser.zero_grad()
             loss_array[epoch, j]=loss.item()
+            #End of training loop
 
             if (epoch+1)%step ==0:
                 """This will record the model performance at selected epochs
@@ -293,22 +313,18 @@ if __name__ == "__main__":
                 """
                 for hook in hooks:
                     hook.remove()
-
                 epoch_count = int((epoch+1)/step) - 1
                 model.eval()
                 with torch.no_grad(): 
                     Y_test_pred = model(X_eval)
                 for i in range(len(Y_test_pred)):
                     performance_array[epoch_count,j,i] = Y_test_pred[i]
-                
-#------------------------------------------------------------------------------------#
+
                 """Now to reattach hooks and return the model to training mode"""
                 for i, layer in enumerate(model.hidden_layers): 
                     hooks.append(layer.register_forward_hook(make_hook(i)))
                 hooks.append(model.output_layer.register_forward_hook(make_hook(len(model.hidden_layers))))
                 model.train()
-#-------------------------------------------------------------------------------------#
-        
 
         """Function should be ensemble mean for each neuron, square it, then compute mean for layer"""
 
@@ -339,11 +355,52 @@ if __name__ == "__main__":
 
 ########################################################################################################################
     """End of the ensemble loop"""
-########################################################################################################################
-    ens_zero_NTK = np.mean(np.stack(NTK_Zero_Matrix, axis =0), axis = 0)
 
-    #Stack each ensemble's ntk matrix along the 0th dimension, then  average across that 0th dimension
-    ens_zero_eigenvalues = np.linalg.eigvals(ens_zero_NTK)
+
+
+
+#Averging net matrix
+########################################################################################################################
+    
+    NTK_stacked = np.stack(NTK_Zero_Matrix, axis = 0) #has dimensionality [Ensemblenum, N,N]
+    ens_zero_NTK = np.mean(NTK_stacked, axis = 0)
+    #Stack each ensemble's ntk matrix along the 0th dimension, then average across that 0th dimension
+    eigvals, eigvecs = np.linalg.eigh(ens_zero_NTK) #Calculates the average NTK's eigenvalues and eigenvectors
+    
+    #now calculate the variance along each element of the NTK matrix for different ensemble members
+    element_var = np.var(NTK_stacked, axis = 0) / len(NTK_Zero_Matrix) 
+    #This is an array of shape [N,N], where each element is the uncertainty on the mean NTK's (ens_zero_NTK) value at corresponding point
+    
+    eigval_uncert = np.zeros(len(eigvals)) #Creates a zero array of length of the eigenvalue array, one uncertainty per eigenvalue
+    for k in range(len(eigvals)):
+        v = eigvecs[:,k] #Creates a list of all the corresponding eigenvectors for each ensemble
+        grad_matrix = np.outer(v,v) #Calculates the outerproduct of the vector
+        #Above is the uncertainty on the individual eigenvector to perturbations of the NTK matrix
+        eigval_uncert[k] = np.sqrt(np.sum(grad_matrix**2 * element_var)) #Error propagation
+
+    mean_eigenvals = np.sort(eigvals)#You use eigvalsh for symmetric matrices
+    
+
+
+
+########################################################################################################################
+
+
+
+
+#Trying on eigenvalue by eigenvalue basis
+    # eigenvalue_array = np.zeros((len(NTK_Zero_Matrix),len(X_train))) #Creates array of size [ensemble, test_data]
+    # for i in range(len(NTK_Zero_Matrix)):
+    #     eigenvals = np.sort(np.linalg.eigvals(NTK_Zero_Matrix[i]))
+    #     eigenvalue_array[i,:] =eigenvals
+    # eigval_uncert = np.std(eigenvalue_array, axis = 0)/np.sqrt(eigenvalue_array.shape[0]) #standard error on mean calculation
+    # mean_eigenvals = np.mean(eigenvalue_array, axis = 0)
+########################################################################################################################
+
+    if np.any(mean_eigenvals< 0):
+        print(f"Negative eigenvalue in list")
+    ens_zero_eigenvalues = mean_eigenvals[mean_eigenvals>0]
+    #ens_zero_eigenvalues = np.linalg.eigvals(ens_zero_NTK)
     print(f'The eigenvalues of the ensemble average NTK matrix are {ens_zero_eigenvalues} ')
 
 
@@ -356,6 +413,8 @@ if __name__ == "__main__":
     ensemble_means = {i:[] for i in range(num_layers)}
     ensemble_uncertainty = {i:[] for i in range(num_layers)}
 
+    alignment_uncert = np.std(alignment_array, axis = 0)/np.sqrt(args.EnsembleNum)
+    alignment_mean = np.mean(alignment_array, axis = 0)
 
     #Sanity checker
     for k in range(num_layers):
@@ -396,10 +455,6 @@ if __name__ == "__main__":
         #                                )
         # ensemble_uncertainty[i] = np.array(results)
        
-       
-       
-       
-       
         #ensemble_uncertainty[i] = np.array(ensemble_uncertainty[i]) #Need it to be a numpy array
         #What is remaining is a list of dimensionality [epochs-1, means], this is the appended to the ith component of the ensemble_means dictionary
 
@@ -412,25 +467,22 @@ if __name__ == "__main__":
     # NTK_df.to_csv('NTK_matrix.csv', float_format='%.2f')
     #Saving the csv^^
 
+    """End of calculations"""
+#####################################################################################################################################
 
-    #Above is just standard error calculation... sigma/sqrt(N)
+    """Starting plots"""
     fig, ax = plt.subplots(figsize=(10, 6)) 
     for k in range(len(ensemble_means)): 
-        """Attempting to go performance by performance to mitigate the zoomout effect of training over all epochs"""
-
         epochs_axis = range(1,args.Epochs) #Note, we start at 1 since using a np.diff finite difference schema
         mean = ensemble_means[k]
-        std = ensemble_uncertainty[k]
-        
-        # Single line with shaded uncertainty band
+        #std = ensemble_uncertainty[k]
         ax.plot(epochs_axis, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
         #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
 
     #Adding important regions to plot
-    for ntk_pt in NTK_points:
-        ax.axvspan(ntk_pt - 10, ntk_pt + 10, color='purple', alpha=0.3)
+    for j in range(len(NTK_points)):
+        ax.axvspan(NTK_points[j] - eigval_uncert[j], NTK_points[j] + eigval_uncert[j], color='purple', alpha=0.3)
         #Axvspan expects a single point, cannot use an array, hence need the for loop    
-        #10 has been set aribitrarily, there will be actual uncertainty I am just not sure where to calculate it yet
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Pre-Activation Derivative')
     ax.set_title('Finite Difference of Layer Pre-Activations')
@@ -439,16 +491,13 @@ if __name__ == "__main__":
     plt.show()
     plt.close()
 
-
-
     """Excluding the final layer"""
-
     fig, ax = plt.subplots(figsize=(10, 6))
     for k in range(len(ensemble_means)-1): 
 
         epochs_axis = range(1,args.Epochs) #Note, we start at 1 since using a np.diff finite difference schema
         mean = ensemble_means[k]
-        std = ensemble_uncertainty[k]
+        #std = ensemble_uncertainty[k]
         
         # Single line with shaded uncertainty band
         ax.plot(epochs_axis, mean, label=f'Layer {k+1}')
@@ -457,11 +506,24 @@ if __name__ == "__main__":
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Pre-Activation Derivative')
     ax.set_title('Finite Difference of Layer Pre-Activations')
-    for ntk_pt in NTK_points:
-        ax.axvspan(ntk_pt - 10, ntk_pt + 10, color='purple', alpha=0.3)
+    for j in range(len(NTK_points)):
+        ax.axvspan(NTK_points[j] - eigval_uncert[j], NTK_points[j] + eigval_uncert[j], color='purple', alpha=0.3)
         #Axvspan expects a single point, cannot use an array, hence need the for loop
     ax.legend()
     plt.tight_layout()
+    plt.show()
+    plt.close()
+
+
+    """NTK alignment value"""
+    print(f'The dimensionality of the alignment_mean array is {np.shape(alignment_mean)}')
+    """Plotting alignment values"""
+    plt.figure(figsize=(8,6))
+    plt.plot(np.arange(0,args.Epochs,100),alignment_mean)
+    plt.fill_between(np.arange(0,args.Epochs,100), alignment_mean +alignment_uncert, alignment_mean-alignment_uncert, alpha = 0.3)
+    plt.xlabel(f'Epoch')
+    plt.ylabel(f'Alignment')
+    plt.title(f'Alignment of the NTK vs Epoch')
     plt.show()
     plt.close()
 
@@ -483,8 +545,6 @@ if __name__ == "__main__":
     ensemble_uncert = np.std(performance_array,axis = 1)/np.sqrt(args.EnsembleNum)
     x_vals = X_eval.squeeze().numpy()
     for k in range(performance_array.shape[0]):
-        
-        
         epoch_value = (k+1)*step
         plt.figure(figsize=(8,6))
         plt.plot(x_vals, mean_ensemble_val[k,:], label = f'Predicted Values')
@@ -497,4 +557,4 @@ if __name__ == "__main__":
         plt.title(f'Performance of the model at epoch {epoch_value}')
         plt.legend()
         plt.show()
-        plt.close() #Prevents data from piling up
+        plt.close() 
