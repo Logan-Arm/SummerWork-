@@ -219,6 +219,7 @@ if __name__ == "__main__":
     num_layers = args.HiddenLayerDepth+1
     ensemble_derivs = {i:[] for i in range(num_layers)} #Removed the _sq, no longer working with the square
     
+
     NTK_Zero_Matrix = []
     """Creates a 1 dimensional numpy array of length =  ensemblenumber, will append the initial NTK value for each ensemble
     member here, then average it to create the average NTK at time = 0
@@ -226,6 +227,12 @@ if __name__ == "__main__":
 
     Y_vector = Y_train.numpy()
     normalising_const = np.dot(Y_vector,Y_vector.T)#Normalising constant to be used in alignment calculations
+    
+    """Creating an eigenvector alignment array to store data of e^T y where y is our training data
+    Must have corresponding dimensionality [Training_time, ensemble member, eigenvector alignment]
+    """
+    evec_alignment = np.zeros((args.Epochs//args.AlignmentInterval, args.EnsembleNum, 5)) #Come back to this, the 5 being hardcoded is not great, but directly from Kenway
+    eval_array = np.zeros((args.Epochs//args.AlignmentInterval, args.EnsembleNum, 5))
 
     #Alignment array needs to have following dimensionality [ensemblenum, epoch]
     alignment_array = np.zeros((args.EnsembleNum,args.Epochs//args.AlignmentInterval))
@@ -289,8 +296,16 @@ if __name__ == "__main__":
                 remove_hooks(hooks)
                 ntk_matrix = NTK_calc(model,X_train).numpy()
                 
+                evals, evecs = np.linalg.eigh(ntk_matrix) #calculates eigenvectors and eigenvales
+                selected_indices = np.argsort(evals)[-5:] #Takes last 5 values of the sorted eigenvalues
+                selected_evecs = evecs[:,selected_indices]
+                selected_evals = evals[selected_indices]
+                for z in range(selected_evecs.shape[1]):
+                    evec_alignment[epoch//args.AlignmentInterval, j, z] = np.dot(selected_evecs[:,z].T,Y_vector)/np.linalg.norm(Y_vector) #Calculates the eigenvalue alignment i.e., e^T Y
+                    eval_array[epoch//args.AlignmentInterval, j, z] = selected_evals[z] #Appends the eigenvalue
                 alignment_item = np.dot(Y_vector,ntk_matrix)
-                alignment_array[j,epoch//args.AlignmentInterval] = np.dot(alignment_item,Y_vector.T)/normalising_const
+                ntk_norm = np.linalg.norm(ntk_matrix,'fro') #Calculates the frobenius norm of the matrix
+                alignment_array[j,epoch//args.AlignmentInterval] = np.dot(alignment_item,Y_vector.T)/(normalising_const * ntk_norm) 
                 
                 #Re-adding hooks
                 for i, layer in enumerate(model.hidden_layers): #Note this does not include the output layer
@@ -379,24 +394,8 @@ if __name__ == "__main__":
         eigval_uncert[k] = np.sqrt(np.sum(grad_matrix**2 * element_var)) #Error propagation
 
     mean_eigenvals = np.sort(eigvals)#You use eigvalsh for symmetric matrices
+
     
-
-
-
-########################################################################################################################
-
-
-
-
-#Trying on eigenvalue by eigenvalue basis
-    # eigenvalue_array = np.zeros((len(NTK_Zero_Matrix),len(X_train))) #Creates array of size [ensemble, test_data]
-    # for i in range(len(NTK_Zero_Matrix)):
-    #     eigenvals = np.sort(np.linalg.eigvals(NTK_Zero_Matrix[i]))
-    #     eigenvalue_array[i,:] =eigenvals
-    # eigval_uncert = np.std(eigenvalue_array, axis = 0)/np.sqrt(eigenvalue_array.shape[0]) #standard error on mean calculation
-    # mean_eigenvals = np.mean(eigenvalue_array, axis = 0)
-########################################################################################################################
-
     if np.any(mean_eigenvals< 0):
         print(f"Negative eigenvalue in list")
     ens_zero_eigenvalues = mean_eigenvals[mean_eigenvals>0]
@@ -408,8 +407,8 @@ if __name__ == "__main__":
     print(f"The specific points of interest from the initial NTK axes is {NTK_points}")
 
     """Need to remove any points which are outside the maximum epoch range"""
-    
-    NTK_points = NTK_points[NTK_points <= args.Epochs].real #Only care about real eigenvalues, filter out any points which are beyond our training range
+    max_time = args.Epochs * args.lr #Adjust it to be in terms of learning rate
+    NTK_points = NTK_points[NTK_points <= max_time].real #Only care about real eigenvalues, filter out any points which are beyond our training range
     ensemble_means = {i:[] for i in range(num_layers)}
     ensemble_uncertainty = {i:[] for i in range(num_layers)}
 
@@ -459,10 +458,20 @@ if __name__ == "__main__":
         #What is remaining is a list of dimensionality [epochs-1, means], this is the appended to the ith component of the ensemble_means dictionary
 
 
-    """Printing out the NTK matrix"""
-    train_vals = X_train.squeeze().numpy().round(2)
-    NTK_df = pd.DataFrame(ens_zero_NTK, index=train_vals, columns=train_vals)
-    print(NTK_df.to_string(float_format=lambda x: f'{x:.2f}'))
+    """Calculating ensemble values of eigenvector alignment
+    Recall evec_alignment has shape [time, ensemble, evec]
+    """
+    evec_alignment_uncert = np.std(evec_alignment, axis = 1)/np.sqrt(args.EnsembleNum)
+    evec_alignment_mean = np.mean(evec_alignment, axis = 1)
+
+
+    """Calculating the 5 largest eigenvalues"""
+    eval_5_uncert = np.std(eval_array,axis = 1)/np.sqrt(args.EnsembleNum)
+    eval_5_array = np.mean(eval_array, axis =1)
+    # """Printing out the NTK matrix"""
+    # train_vals = X_train.squeeze().numpy().round(2)
+    # NTK_df = pd.DataFrame(ens_zero_NTK, index=train_vals, columns=train_vals)
+    # print(NTK_df.to_string(float_format=lambda x: f'{x:.2f}'))
 
     # NTK_df.to_csv('NTK_matrix.csv', float_format='%.2f')
     #Saving the csv^^
@@ -470,40 +479,40 @@ if __name__ == "__main__":
     """End of calculations"""
 #####################################################################################################################################
 
+    #Converting activation plots to be in terms of training time not epochs
+
     """Starting plots"""
     fig, ax = plt.subplots(figsize=(10, 6)) 
     for k in range(len(ensemble_means)): 
         epochs_axis = range(1,args.Epochs) #Note, we start at 1 since using a np.diff finite difference schema
+        train_time_axis = np.array(epochs_axis) * args.lr
         mean = ensemble_means[k]
         #std = ensemble_uncertainty[k]
-        ax.plot(epochs_axis, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+        ax.plot(train_time_axis, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
         #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
 
     #Adding important regions to plot
     for j in range(len(NTK_points)):
         ax.axvspan(NTK_points[j] - eigval_uncert[j], NTK_points[j] + eigval_uncert[j], color='purple', alpha=0.3)
         #Axvspan expects a single point, cannot use an array, hence need the for loop    
-    ax.set_xlabel('Epoch')
+    ax.set_xlabel('Training Time')
     ax.set_ylabel('Pre-Activation Derivative')
     ax.set_title('Finite Difference of Layer Pre-Activations')
     ax.legend()
     plt.tight_layout()
+    plt.savefig(r'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\Activity')
     plt.show()
     plt.close()
 
     """Excluding the final layer"""
     fig, ax = plt.subplots(figsize=(10, 6))
     for k in range(len(ensemble_means)-1): 
-
         epochs_axis = range(1,args.Epochs) #Note, we start at 1 since using a np.diff finite difference schema
+        train_time_axis = np.array(epochs_axis) * args.lr
         mean = ensemble_means[k]
         #std = ensemble_uncertainty[k]
-        
-        # Single line with shaded uncertainty band
-        ax.plot(epochs_axis, mean, label=f'Layer {k+1}')
-        #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
-
-    ax.set_xlabel('Epoch')
+        ax.plot(train_time_axis, mean, label=f'Layer {k+1}')
+    ax.set_xlabel('Training Time')
     ax.set_ylabel('Pre-Activation Derivative')
     ax.set_title('Finite Difference of Layer Pre-Activations')
     for j in range(len(NTK_points)):
@@ -511,6 +520,7 @@ if __name__ == "__main__":
         #Axvspan expects a single point, cannot use an array, hence need the for loop
     ax.legend()
     plt.tight_layout()
+    plt.savefig(r'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\ActivityNoOuter')
     plt.show()
     plt.close()
 
@@ -519,23 +529,54 @@ if __name__ == "__main__":
     print(f'The dimensionality of the alignment_mean array is {np.shape(alignment_mean)}')
     """Plotting alignment values"""
     plt.figure(figsize=(8,6))
-    plt.plot(np.arange(0,args.Epochs,100),alignment_mean)
-    plt.fill_between(np.arange(0,args.Epochs,100), alignment_mean +alignment_uncert, alignment_mean-alignment_uncert, alpha = 0.3)
-    plt.xlabel(f'Epoch')
+    train_axis_alignment = args.lr * np.arange(0,args.Epochs,100)
+    plt.plot(train_axis_alignment,alignment_mean)
+    plt.fill_between(train_axis_alignment, alignment_mean +alignment_uncert, alignment_mean-alignment_uncert, alpha = 0.3)
+    plt.xlabel(f'Training time')
     plt.ylabel(f'Alignment')
-    plt.title(f'Alignment of the NTK vs Epoch')
+    plt.title(f'Alignment of the NTK vs Training Time')
+    plt.savefig(r'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\NTKAlignment')
+    plt.show()
+    plt.close()
+
+    """Plotting the eigenvector alignment value"""
+    plt.figure(figsize=(8,6))
+    for k in range(evec_alignment_mean.shape[1]):
+        plt.plot(train_axis_alignment,evec_alignment_mean[:,k], label = f"Eigenvector {k+1}")
+        plt.fill_between(train_axis_alignment, evec_alignment_mean[:,k]+evec_alignment_uncert[:,k],evec_alignment_mean[:,k]-evec_alignment_uncert[:,k], alpha = 0.3 )
+    plt.xlabel(f"Training time")
+    plt.ylabel(f"Normalised eigenvector alignment value")
+    plt.title(f"5 Largest Eigenvector Alignment Values vs Training Time")
+    plt.legend()
+    plt.savefig(r'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\EigenvectorAlignment')
+    plt.show()
+    plt.close()
+
+
+    """Plotting the top 5 eigenvalues"""
+    plt.figure(figsize=(8,6))
+    for k in range(evec_alignment_mean.shape[1]):
+        plt.plot(train_axis_alignment,eval_5_array[:,k], label = f"Eigenvalue {k+1}")
+        plt.fill_between(train_axis_alignment, eval_5_array[:,k] + eval_5_uncert[:,k],eval_5_array[:,k] - eval_5_uncert[:,k], alpha = 0.3 )
+    plt.xlabel(f"Training time")
+    plt.ylabel(f" Eigenvalue")
+    plt.title(f"5 Largest Eigenvalues vs Training Time")
+    plt.legend()
+    plt.savefig(r'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\Top5Evals')
     plt.show()
     plt.close()
 
 
     """Plotting Losses"""
+    training_axis_loss = np.arange(args.Epochs) * args.lr
     ensemble_loss = np.mean(loss_array, axis=1)
     ensemble_loss_uncert = np.std(loss_array, axis = 1)/np.sqrt(args.EnsembleNum)
-    plt.plot(range(args.Epochs),ensemble_loss)
-    plt.fill_between(range(args.Epochs),ensemble_loss+ensemble_loss_uncert,ensemble_loss-ensemble_loss_uncert, alpha = 0.3)
-    plt.xlabel(f'Epoch')
+    plt.plot(training_axis_loss,ensemble_loss)
+    plt.fill_between(training_axis_loss,ensemble_loss+ensemble_loss_uncert,ensemble_loss-ensemble_loss_uncert, alpha = 0.3)
+    plt.xlabel(f'Training time')
     plt.ylabel(f"Average ensemble loss value")
-    plt.title(f'Ensemble loss vs epoch')
+    plt.title(f'Ensemble loss vs training time')
+    plt.savefig(r'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\Loss')
     plt.show()
     plt.close
 
@@ -554,7 +595,8 @@ if __name__ == "__main__":
         #plt.fill_between is finicky, needs inputs to be explicitly 1 dimensional, hence the X_test_sorted.squeeze().numpy()
         plt.xlabel(f'X')
         plt.ylabel(f'Y')
-        plt.title(f'Performance of the model at epoch {epoch_value}')
+        plt.title(f'Performance of the model at training time {epoch_value * args.lr}')
         plt.legend()
+        plt.savefig(rf'C:\Users\Logan\Downloads\SummerWork\June16thEigenvectorAlignment\Performance{k+1}')
         plt.show()
         plt.close() 
