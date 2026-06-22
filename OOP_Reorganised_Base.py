@@ -135,6 +135,9 @@ def criterion(y_pred, y_true):
     #Note, in the NN_EFT notes there is a 1/2 which is in front of this term, this is not necessary here as the torch autograd factors this in automatically
 
 
+
+
+
 class MultiLayerNet(nn.Module): #nn.module is the base class for all neural networks in pytorch
 
 
@@ -212,6 +215,8 @@ class Trial():
         self.SaveFig = SaveFig
         self.numlayer = self.depth+1
 
+
+        self.snapshot_array = np.geomspace(1,self.epochs,self.performances).astype(int)
         self.step = int(self.epochs/self.performances)
 
         self.ensemble_derivs = {i:[] for i in range(self.numlayer)}
@@ -284,7 +289,8 @@ class Trial():
                 
                 """Calculating the eigenvalues, eigenvectors, and alignment"""
                 evals, evecs = np.linalg.eigh(ntk_matrix) #calculates eigenvectors and eigenvales
-                selected_indices = np.argsort(evals)[-5:] #Takes last 5 values of the sorted eigenvalues
+                selected_indices = np.argsort(evals)[-5:] [::-1]#Takes last 5 values of the sorted eigenvalues
+                #[::-1] Puts in descending order
                 selected_evecs = evecs[:,selected_indices]
                 selected_evals = evals[selected_indices]
                 for z in range(selected_evecs.shape[1]):
@@ -561,11 +567,6 @@ class Trial():
                 plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Performance{k+1}')
             plt.show()
             plt.close() 
-
-
-
-        
-    
     def run_no_plot(self):
         for j in range(self.ensemble):
             self.train_model(j)
@@ -577,6 +578,8 @@ class Trial():
         self.compute_data()
         self.make_plots()
     
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--InputSize', type = int, help='Defines the size of the input node, almost always 1', default = 1)
@@ -601,3 +604,27 @@ if __name__ == "__main__":
     trial = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,args.STD,args.EnsembleNum,args.Performances,
                   args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
     trial.run_plot()
+
+    trial0 = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,args.STD,args.EnsembleNum,args.Performances,
+                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
+    trial0.run_no_plot()
+
+    trial1 = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,2*args.STD,args.EnsembleNum,args.Performances,
+                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
+    trial1.run_no_plot()
+
+    trial2 = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,0.5*args.STD,args.EnsembleNum,args.Performances,
+                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
+    trial2.run_no_plot()
+
+    trial3 = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,0.25*args.STD,args.EnsembleNum,args.Performances,
+                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
+    trial3.run_no_plot()
+
+    trial4 = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,0.1*args.STD,args.EnsembleNum,args.Performances,
+                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
+    trial4.run_no_plot()
+
+    std_values = [args.STD, 2*args.STD, 0.5*args.STD, 0.25*args.STD, 0.1*args.STD]
+    scan_trials = [trial0, trial1, trial2, trial3, trial4]
+
