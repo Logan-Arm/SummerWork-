@@ -195,7 +195,7 @@ class MultiLayerNet(nn.Module): #nn.module is the base class for all neural netw
 
     
 class Trial():
-    def __init__(self, input,output,width,depth,lr,epochs,STD,ensemblenum,performances,bootstraps,alignmentint,X_train,Y_train,x_test,y_test,filename, SaveFig):
+    def __init__(self, input,output,width,depth,lr,epochs,STD,ensemblenum,performances,bootstraps,alignmentint,X_train,Y_train,x_test,y_test,filename, SaveFig,regions):
         self.input = input
         self.output = output
         self.width = width
@@ -214,7 +214,7 @@ class Trial():
         self.Filename = filename
         self.SaveFig = SaveFig
         self.numlayer = self.depth+1
-
+        self.regions = regions
 
         # self.snapshot_array = np.geomspace(1,self.epochs,self.performances).astype(int)
         self.snapshot_array = np.geomspace(1, self.epochs - 1, self.performances).astype(int)
@@ -302,7 +302,7 @@ class Trial():
                 #[::-1] puts in descending order
                 selected_evecs = evecs[:, selected_indices]
                 selected_evals = evals[selected_indices]
-                for z in range(2):
+                for z in range(5):
                     self.evec_alignment[epoch//self.alignmentint, j, z] = np.dot(selected_evecs[:, z].T, self.Y_vector)/(np.linalg.norm(self.Y_vector)) #Normalises
                     self.evalues[epoch//self.alignmentint, j, z] = selected_evals[z]
                 alignment_item = np.dot(self.Y_vector, ntk_matrix)
@@ -311,6 +311,7 @@ class Trial():
                 self.eval1_prev = selected_evals[0]
                 self.eval2_prev = selected_evals[1]
                 self.eval3_prev = selected_evals[2]
+                print(f"The 0th value of eval3 is {self.eval3_prev}")
                 
                 #Re-adding the hooks
                 for i, layer in enumerate(self.model.hidden_layers):
@@ -466,6 +467,9 @@ class Trial():
         self.ensemble_means = {i:[] for i in range(self.numlayer)}
         self.ensemble_uncertainty = {i:[] for i in range(self.numlayer)}
 
+        """Chi array will have one less value than ensemble, since layer 1 will not have a chi reading"""
+        self.chi_array = {i:[] for i in range(self.numlayer-1)}
+
         self.alignment_uncert = np.std(self.NTK_alignment, axis = 0)/np.sqrt(self.ensemble)
         self.alignment_mean = np.mean(self.NTK_alignment, axis = 0)
 
@@ -478,7 +482,7 @@ class Trial():
 
             stacked_ensemble = np.stack(self.ensemble_derivs[i], axis = 0) #Shape is now [ensemble, epochs-1, neurons]
             """What is going on in above line:
-            We are taking the FIRST ELEMENT of the ensemble_derivs, recall from line 248 that this corresponds to selecting a specific layer
+            We are taking the FIRST ELEMENT of the ensemble_derivs, recall that this corresponds to selecting a specific layer
             We then stack all these list elements into one numpy array along the 0th axis of the components, i.e., along the ensemble_num axis
             Therefore we have one numpy array for each layer, of the shape [ensemble, epoch -1, batch, neuron ]
             """
@@ -507,6 +511,13 @@ class Trial():
         
             #ensemble_uncertainty[i] = np.array(ensemble_uncertainty[i]) #Need it to be a numpy array
             #What is remaining is a list of dimensionality [epochs-1, means], this is the appended to the ith component of the ensemble_means dictionary
+
+        """Calculating chi defined as ratio of pre-activation derivs"""
+        for k in range(1,self.numlayer):
+            self.chi_array[k] = (self.ensemble_means[k]/self.ensemble_means[k-1])
+            print(f"Length element is {len(self.ensemble_means[k]/self.ensemble_means[k-1])}") 
+
+        print(f"The length of a chi list in the chi array is {len(self.chi_array[1])}")
 
         """Calculating ensemble values of eigenvector alignment
         Recall evec_alignment has shape [time, ensemble, evec]
@@ -555,151 +566,432 @@ class Trial():
         }
         df = pd.DataFrame(params)
         df.to_csv(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Params', index = False)
+    
+    
+    
     def make_plots(self):
 
-        plt.figure(figsize=(10,6))
-        plt.plot(self.train_time_alignment, self.eval1_rateofchange_mean, label = "Eigenvalue 1 rate of change")
-        plt.plot(self.train_time_alignment, self.eval2_rateofchange_mean, label = "Eigenvalue 2 rate of change")
-        plt.plot(self.train_time_alignment, self.eval3_rateofchange_mean, label = "Eigenvalue 3 rate of change")
-        plt.fill_between(self.train_time_alignment, self.eval1_rateofchange_mean+ self.eval1_rateofchange_uncert, 
-                         self.eval1_rateofchange_mean -self.eval1_rateofchange_uncert, alpha = 0.3)
-        plt.fill_between(self.train_time_alignment, self.eval2_rateofchange_mean+ self.eval2_rateofchange_uncert, 
-                         self.eval2_rateofchange_mean -self.eval2_rateofchange_uncert, alpha = 0.3)
-        plt.fill_between(self.train_time_alignment, self.eval3_rateofchange_mean+ self.eval3_rateofchange_uncert, 
-                         self.eval3_rateofchange_mean -self.eval3_rateofchange_uncert, alpha = 0.3)
-        plt.legend()
-        plt.ylabel(f"Relative rate of change of eigenvalue")
-        plt.xlabel(f"Training time")
-        plt.title(f"Absolute rate of change of eigenvalues 1, 2 and 3 as they vary with training time")
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\RelAbsChange')
-        plt.show()
-        plt.close()
+        """Chi plots"""
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_rate, t_start, t_end)
+                t = self.train_time_rate[mask]
+                fig, ax = plt.subplots(figsize=(10, 6)) 
+                for k in range(1,len(self.chi_array)): 
+                    mean = self.chi_array[k]
+                    #std = ensemble_uncertainty[k]
+                    ax.plot(t, mean[mask], label=f'Chi for Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+                    #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+
+                #Adding important regions to plot
+                for j in range(len(self.NTK_points)):
+                    if t_start <= self.NTK_points[j] <= t_end:
+                        #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                        ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                        #Axvspan expects a single point, cannot use an array, hence need the for loop    
+                ax.set_xlabel('Training Time')
+                ax.set_ylabel('Chi Value')
+                ax.set_title('Chi vs Training Time')
+                ax.legend()
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Chi_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+        else:
+            fig, ax = plt.subplots(figsize=(10, 6)) 
+            for k in range(len(self.chi_array)): 
+                mean = self.chi_array[k]
+                #std = ensemble_uncertainty[k]
+                ax.plot(self.train_time_rate, mean, label=f'Chi Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+                #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+
+            #Adding important regions to plot
+            for j in range(len(self.NTK_points)):
+                #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                #Axvspan expects a single point, cannot use an array, hence need the for loop    
+            ax.set_xlabel('Training Time')
+            ax.set_ylabel('Chi Value')
+            ax.set_title('Chi vs Training Time')
+            ax.legend()
+            plt.tight_layout()
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Chi')
+            #plt.show()
+            plt.close()
 
 
-        plt.figure(figsize=(10,6))
-        plt.plot(self.train_time_alignment, self.eval1_deriv_mean, label = "Eigenvalue 1 rate of change")
-        plt.plot(self.train_time_alignment, self.eval2_deriv_mean, label = "Eigenvalue 2 rate of change")
-        plt.plot(self.train_time_alignment, self.eval3_deriv_mean, label = "Eigenvalue 3 rate of change")
-        plt.fill_between(self.train_time_alignment, self.eval1_deriv_mean+ self.eval1_deriv_uncert, 
-                         self.eval1_deriv_mean - self.eval1_deriv_uncert, alpha = 0.3)
-        plt.fill_between(self.train_time_alignment, self.eval2_deriv_mean+ self.eval2_deriv_uncert, 
-                         self.eval2_deriv_mean - self.eval2_deriv_uncert, alpha = 0.3)
-        plt.fill_between(self.train_time_alignment, self.eval3_deriv_mean+ self.eval3_deriv_uncert, 
-                         self.eval3_deriv_mean - self.eval3_deriv_uncert, alpha = 0.3)
-        plt.legend()
-        plt.ylabel(f"Derivative of the eigenvalues")
-        plt.xlabel(f"Training time")
-        plt.title(f"Time derivative of eigenvalues 1, 2 and 3 as they vary with training time")
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\EvalDeriv')
-        plt.show()
-        plt.close()
+        """Absolute relative rate of change"""
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+                t = self.train_time_alignment[mask]
+                plt.figure(figsize=(10,6))
+                plt.plot(t, self.eval1_rateofchange_mean[mask], label = "Eigenvalue 1 rate of change")
+                plt.plot(t, self.eval2_rateofchange_mean[mask], label = "Eigenvalue 2 rate of change")
+                plt.plot(t, self.eval3_rateofchange_mean[mask], label = "Eigenvalue 3 rate of change")
+                plt.fill_between(t, (self.eval1_rateofchange_mean+ self.eval1_rateofchange_uncert)[mask], 
+                                (self.eval1_rateofchange_mean -self.eval1_rateofchange_uncert)[mask], alpha = 0.3)
+                plt.fill_between(t, (self.eval2_rateofchange_mean+ self.eval2_rateofchange_uncert)[mask], 
+                                (self.eval2_rateofchange_mean -self.eval2_rateofchange_uncert)[mask], alpha = 0.3)
+                plt.fill_between(t, (self.eval3_rateofchange_mean+ self.eval3_rateofchange_uncert)[mask], 
+                                (self.eval3_rateofchange_mean -self.eval3_rateofchange_uncert)[mask], alpha = 0.3)
+                plt.legend()
+                plt.ylabel(f"Absolute relative rate of change of eigenvalue")
+                plt.xlabel(f"Training time")
+                plt.title(f"Absolute relative rate of change of eigenvalues 1, 2 and 3 as they vary with training time")
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\RelAbsChange_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+        else:
+            plt.figure(figsize=(10,6))
+            plt.plot(self.train_time_alignment, self.eval1_rateofchange_mean, label = "Eigenvalue 1 rate of change")
+            plt.plot(self.train_time_alignment, self.eval2_rateofchange_mean, label = "Eigenvalue 2 rate of change")
+            plt.plot(self.train_time_alignment, self.eval3_rateofchange_mean, label = "Eigenvalue 3 rate of change")
+            plt.fill_between(self.train_time_alignment, self.eval1_rateofchange_mean+ self.eval1_rateofchange_uncert, 
+                            self.eval1_rateofchange_mean -self.eval1_rateofchange_uncert, alpha = 0.3)
+            plt.fill_between(self.train_time_alignment, self.eval2_rateofchange_mean+ self.eval2_rateofchange_uncert, 
+                            self.eval2_rateofchange_mean -self.eval2_rateofchange_uncert, alpha = 0.3)
+            plt.fill_between(self.train_time_alignment, self.eval3_rateofchange_mean+ self.eval3_rateofchange_uncert, 
+                            self.eval3_rateofchange_mean -self.eval3_rateofchange_uncert, alpha = 0.3)
+            plt.legend()
+            plt.ylabel(f"Relative rate of change of eigenvalue")
+            plt.xlabel(f"Training time")
+            plt.title(f"Absolute rate of change of eigenvalues 1, 2 and 3 as they vary with training time")
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\RelAbsChange')
+            #plt.show()
+            plt.close()
+
+
+        """Eigenvalue derivatives"""
+    
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+                t = self.train_time_alignment[mask]
+                plt.figure(figsize=(10,6))
+                plt.plot(t, self.eval1_deriv_mean[mask], label = "Eigenvalue 1 rate of change")
+                plt.plot(t, self.eval2_deriv_mean[mask], label = "Eigenvalue 2 rate of change")
+                plt.plot(t, self.eval3_deriv_mean[mask], label = "Eigenvalue 3 rate of change")
+                plt.fill_between(t, (self.eval1_deriv_mean+ self.eval1_deriv_uncert)[mask], 
+                                (self.eval1_deriv_mean - self.eval1_deriv_uncert)[mask], alpha = 0.3)
+                plt.fill_between(t, (self.eval2_deriv_mean+ self.eval2_deriv_uncert)[mask], 
+                                (self.eval2_deriv_mean - self.eval2_deriv_uncert)[mask], alpha = 0.3)
+                plt.fill_between(t, (self.eval3_deriv_mean+ self.eval3_deriv_uncert)[mask], 
+                                (self.eval3_deriv_mean - self.eval3_deriv_uncert)[mask], alpha = 0.3)
+                plt.legend()
+                plt.ylabel(f"Derivative of the eigenvalues")
+                plt.xlabel(f"Training time")
+                plt.title(f"Time derivative of eigenvalues 1, 2 and 3 as they vary with training time")
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\EvalDeriv_{t_start}_{t_end}')
+
+                #plt.show()
+                plt.close()
+            
+            
+        else:
+            plt.figure(figsize=(10,6))
+            plt.plot(self.train_time_alignment, self.eval1_deriv_mean, label = "Eigenvalue 1 rate of change")
+            plt.plot(self.train_time_alignment, self.eval2_deriv_mean, label = "Eigenvalue 2 rate of change")
+            plt.plot(self.train_time_alignment, self.eval3_deriv_mean, label = "Eigenvalue 3 rate of change")
+            plt.fill_between(self.train_time_alignment, self.eval1_deriv_mean+ self.eval1_deriv_uncert, 
+                            self.eval1_deriv_mean - self.eval1_deriv_uncert, alpha = 0.3)
+            plt.fill_between(self.train_time_alignment, self.eval2_deriv_mean+ self.eval2_deriv_uncert, 
+                            self.eval2_deriv_mean - self.eval2_deriv_uncert, alpha = 0.3)
+            plt.fill_between(self.train_time_alignment, self.eval3_deriv_mean+ self.eval3_deriv_uncert, 
+                            self.eval3_deriv_mean - self.eval3_deriv_uncert, alpha = 0.3)
+            plt.legend()
+            plt.ylabel(f"Derivative of the eigenvalues")
+            plt.xlabel(f"Training time")
+            plt.title(f"Time derivative of eigenvalues 1, 2 and 3 as they vary with training time")
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\EvalDeriv')
+            #plt.show()
+            plt.close()
 
 
         """Pre-activation rate"""
-        fig, ax = plt.subplots(figsize=(10, 6)) 
-        for k in range(len(self.ensemble_means)): 
-            mean = self.ensemble_means[k]
-            #std = ensemble_uncertainty[k]
-            ax.plot(self.train_time_rate, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
-            #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_rate, t_start, t_end)
+                t = self.train_time_rate[mask]
+                fig, ax = plt.subplots(figsize=(10, 6)) 
+                for k in range(len(self.ensemble_means)): 
+                    mean = self.ensemble_means[k]
+                    #std = ensemble_uncertainty[k]
+                    ax.plot(t, mean[mask], label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+                    #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
 
-        #Adding important regions to plot
-        for j in range(len(self.NTK_points)):
-            #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
-            ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
-            #Axvspan expects a single point, cannot use an array, hence need the for loop    
-        ax.set_xlabel('Training Time')
-        ax.set_ylabel('Pre-Activation Derivative')
-        ax.set_title('Finite Difference of Layer Pre-Activations')
-        ax.legend()
-        plt.tight_layout()
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Activity')
-        plt.show()
-        plt.close()
+                #Adding important regions to plot
+                for j in range(len(self.NTK_points)):
+                    if t_start <= self.NTK_points[j] <= t_end:
+                        #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                        ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                        #Axvspan expects a single point, cannot use an array, hence need the for loop    
+                ax.set_xlabel('Training Time')
+                ax.set_ylabel('Pre-Activation Derivative')
+                ax.set_title('Finite Difference of Layer Pre-Activations')
+                ax.legend()
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Activity_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+        else:
+            fig, ax = plt.subplots(figsize=(10, 6)) 
+            for k in range(len(self.ensemble_means)): 
+                mean = self.ensemble_means[k]
+                #std = ensemble_uncertainty[k]
+                ax.plot(self.train_time_rate, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+                #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+
+            #Adding important regions to plot
+            for j in range(len(self.NTK_points)):
+                #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                #Axvspan expects a single point, cannot use an array, hence need the for loop    
+            ax.set_xlabel('Training Time')
+            ax.set_ylabel('Pre-Activation Derivative')
+            ax.set_title('Finite Difference of Layer Pre-Activations')
+            ax.legend()
+            plt.tight_layout()
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Activity')
+            #plt.show()
+            plt.close()
 
         """Excluding the final layer"""
-        fig, ax = plt.subplots(figsize=(10, 6))
-        for k in range(len(self.ensemble_means)-1): 
-            mean = self.ensemble_means[k]
-            #std = ensemble_uncertainty[k]
-            ax.plot(self.train_time_rate, mean, label=f'Layer {k+1}')
-        ax.set_xlabel('Training Time')
-        ax.set_ylabel('Pre-Activation Derivative')
-        ax.set_title('Finite Difference of Layer Pre-Activations')
-        #Adding important regions to plot
-        for j in range(len(self.NTK_points)):
-            #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
-            ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
-            #Axvspan expects a single point, cannot use an array, hence need the for loop
-        ax.legend()
-        plt.tight_layout()
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\ActivityNoOuter')
-        plt.show()
-        plt.close()
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_rate, t_start, t_end)
+                t = self.train_time_rate[mask]
+                fig, ax = plt.subplots(figsize=(10, 6)) 
+                for k in range(len(self.ensemble_means)-1): 
+                    mean = self.ensemble_means[k]
+                    #std = ensemble_uncertainty[k]
+                    ax.plot(t, mean[mask], label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+                    #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+
+                #Adding important regions to plot
+                for j in range(len(self.NTK_points)):
+                    if t_start <= self.NTK_points[j] <= t_end:
+                        #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                        ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                        #Axvspan expects a single point, cannot use an array, hence need the for loop    
+                ax.set_xlabel('Training Time')
+                ax.set_ylabel('Pre-Activation Derivative')
+                ax.set_title('Finite Difference of Layer Pre-Activations')
+                ax.legend()
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Activity_NoOuter_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+        else:
+            fig, ax = plt.subplots(figsize=(10, 6)) 
+            for k in range(len(self.ensemble_means)-1): 
+                mean = self.ensemble_means[k]
+                #std = ensemble_uncertainty[k]
+                ax.plot(self.train_time_rate, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+                #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+
+            #Adding important regions to plot
+            for j in range(len(self.NTK_points)):
+                #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                #Axvspan expects a single point, cannot use an array, hence need the for loop    
+            ax.set_xlabel('Training Time')
+            ax.set_ylabel('Pre-Activation Derivative')
+            ax.set_title('Finite Difference of Layer Pre-Activations')
+            ax.legend()
+            plt.tight_layout()
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Activity_NoOuter')
+            #plt.show()
+            plt.close()
 
         """NTK alignment value"""
-        print(f'The dimensionality of the alignment_mean array is {np.shape(self.alignment_mean)}')
-        """Plotting alignment values"""
-        plt.figure(figsize=(8,6))
-        plt.plot(self.train_time_alignment,self.alignment_mean)
-        plt.fill_between(self.train_time_alignment, self.alignment_mean +self.alignment_uncert, self.alignment_mean-self.alignment_uncert, alpha = 0.3)
-        plt.xlabel(f'Training time')
-        plt.ylabel(f'Alignment')
-        plt.title(f'Alignment of the NTK vs Training Time')
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment')
-        plt.show()
-        plt.close()
+
+        #print(f'The dimensionality of the alignment_mean array is {np.shape(self.alignment_mean)}')
+        
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+                t = self.train_time_alignment[mask]
+                plt.figure(figsize=(8,6))
+                plt.plot(t,self.alignment_mean[mask])
+                plt.fill_between(t, (self.alignment_mean +self.alignment_uncert)[mask], (self.alignment_mean-self.alignment_uncert)[mask], alpha = 0.3)
+                plt.xlabel(f'Training time')
+                plt.ylabel(f'Alignment')
+                plt.title(f'Alignment of the NTK vs Training Time')
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+
+        else:
+            """Plotting alignment values"""
+            plt.figure(figsize=(8,6))
+            plt.plot(self.train_time_alignment,self.alignment_mean)
+            plt.fill_between(self.train_time_alignment, self.alignment_mean +self.alignment_uncert, self.alignment_mean-self.alignment_uncert, alpha = 0.3)
+            plt.xlabel(f'Training time')
+            plt.ylabel(f'Alignment')
+            plt.title(f'Alignment of the NTK vs Training Time')
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment')
+            #plt.show()
+            plt.close()
+
+
+
+
+
 
         """Plotting the eigenvector alignment value"""
-        plt.figure(figsize=(8,6))
-        for k in range(self.evec_alignment_mean.shape[1]):
-            plt.plot(self.train_time_alignment,self.evec_alignment_mean[:,k], label = f"Eigenvector {k+1}")
-            plt.fill_between(self.train_time_alignment, self.evec_alignment_mean[:,k]+self.evec_alignment_uncert[:,k],self.evec_alignment_mean[:,k]-self.evec_alignment_uncert[:,k], alpha = 0.3 )
-        plt.xlabel(f"Training time")
-        plt.ylabel(f"Normalised eigenvector alignment value")
-        plt.title(f"5 Largest Eigenvector Alignment Values vs Training Time")
-        plt.legend()
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\EigenvectorAlignment')
-        plt.show()
-        plt.close()
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+                t = self.train_time_alignment[mask]
+                plt.figure(figsize=(8,6))
+                for k in range(self.evec_alignment_mean.shape[1]):
+                    plt.plot(t,self.evec_alignment_mean[:,k][mask], label = f"Eigenvector {k+1}")
+                    plt.fill_between(t, (self.evec_alignment_mean[:,k]+self.evec_alignment_uncert[:,k])[mask],
+                                     (self.evec_alignment_mean[:,k]-self.evec_alignment_uncert[:,k])[mask], alpha = 0.3 )
+                plt.xlabel(f"Training time")
+                plt.ylabel(f"Normalised eigenvector alignment value")
+                plt.title(f"5 Largest Eigenvector Alignment Values vs Training Time")
+                plt.legend()
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\EigenvectorAlignment_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+
+        else:
+                
+            plt.figure(figsize=(8,6))
+            for k in range(self.evec_alignment_mean.shape[1]):
+                plt.plot(self.train_time_alignment,self.evec_alignment_mean[:,k], label = f"Eigenvector {k+1}")
+                plt.fill_between(self.train_time_alignment, self.evec_alignment_mean[:,k]+self.evec_alignment_uncert[:,k],self.evec_alignment_mean[:,k]-self.evec_alignment_uncert[:,k], alpha = 0.3 )
+            plt.xlabel(f"Training time")
+            plt.ylabel(f"Normalised eigenvector alignment value")
+            plt.title(f"5 Largest Eigenvector Alignment Values vs Training Time")
+            plt.legend()
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\EigenvectorAlignment')
+            #plt.show()
+            plt.close()
 
 
         """Plotting the top 5 eigenvalues"""
-        plt.figure(figsize=(8,6))
-        for k in range(self.evec_alignment_mean.shape[1]):
-            plt.plot(self.train_time_alignment,self.eval_5_array[:,k], label = f"Eigenvalue {k+1}")
-            plt.fill_between(self.train_time_alignment, self.eval_5_array[:,k] + self.eval_5_uncert[:,k],self.eval_5_array[:,k] - self.eval_5_uncert[:,k], alpha = 0.3 )
-        plt.xlabel(f"Training time")
-        plt.ylabel(f" Eigenvalue")
-        plt.title(f"5 Largest Eigenvalues vs Training Time")
-        plt.legend()
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Top5Evals')
-        plt.show()
-        plt.close()
+
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+                t = self.train_time_alignment[mask]
+                plt.figure(figsize=(8,6))
+                for k in range(self.evec_alignment_mean.shape[1]):
+                    plt.plot(t,self.eval_5_array[:,k][mask], label = f"Eigenvalue {k+1}")
+                    plt.fill_between(t, (self.eval_5_array[:,k] + self.eval_5_uncert[:,k])[mask],(self.eval_5_array[:,k] - self.eval_5_uncert[:,k])[mask]
+                                     , alpha = 0.3 )
+                plt.xlabel(f"Training time")
+                plt.ylabel(f" Eigenvalue")
+                plt.title(f"5 Largest Eigenvalues vs Training Time")
+                plt.legend()
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Top5Evals_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+        else:
+                
+            plt.figure(figsize=(8,6))
+            for k in range(self.evec_alignment_mean.shape[1]):
+                plt.plot(self.train_time_alignment,self.eval_5_array[:,k], label = f"Eigenvalue {k+1}")
+                plt.fill_between(self.train_time_alignment, self.eval_5_array[:,k] + self.eval_5_uncert[:,k],self.eval_5_array[:,k] - self.eval_5_uncert[:,k], alpha = 0.3 )
+            plt.xlabel(f"Training time")
+            plt.ylabel(f" Eigenvalue")
+            plt.title(f"5 Largest Eigenvalues vs Training Time")
+            plt.legend()
+            if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Top5Evals')
+            #plt.show()
+            plt.close()
+
+        """Plotting eigenvalues 2-5"""
+
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+                t = self.train_time_alignment[mask]
+                plt.figure(figsize=(8,6))
+                for k in range(self.evec_alignment_mean.shape[1]-1):
+                    plt.plot(t,self.eval_5_array[:,k+1][mask], label = f"Eigenvalue {k+2}")
+                    plt.fill_between(t, (self.eval_5_array[:,k+1] + self.eval_5_uncert[:,k+1])[mask],(self.eval_5_array[:,k+1] - self.eval_5_uncert[:,k+1])[mask]
+                                     , alpha = 0.3 )
+                plt.xlabel(f"Training time")
+                plt.ylabel(f" Eigenvalue")
+                plt.title(f"4 Largest Eigenvalues vs Training Time (Excluding Eval 1)")
+                plt.legend()
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Top5Evals_No1_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+        else:
+                
+            plt.figure(figsize=(8,6))
+            for k in range(self.evec_alignment_mean.shape[1]-1):
+                plt.plot(self.train_time_alignment,self.eval_5_array[:,k+1], label = f"Eigenvalue {k+2}")
+                plt.fill_between(self.train_time_alignment, (self.eval_5_array[:,k]+1 + self.eval_5_uncert[:,k+1]),(self.eval_5_array[:,k+1] - self.eval_5_uncert[:,k+1])
+                                    , alpha = 0.3 )
+            plt.xlabel(f"Training time")
+            plt.ylabel(f" Eigenvalue")
+            plt.title(f"4 Largest Eigenvalues vs Training Time (Excluding Eval 1)")
+            plt.legend()
+            if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Top5Evals_No1')
+            #plt.show()
+            plt.close()
+
 
 
         """Plotting Losses"""
-        ensemble_loss = np.mean(self.loss_array, axis=1)
-        ensemble_loss_uncert = np.std(self.loss_array, axis = 1)/np.sqrt(self.ensemble)
-        plt.plot(self.train_time_total,ensemble_loss)
-        plt.fill_between(self.train_time_total,ensemble_loss+ensemble_loss_uncert,ensemble_loss-ensemble_loss_uncert, alpha = 0.3)
-        for j in range(len(self.NTK_points)):
-            #plt.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
-            plt.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
-        plt.xlabel(f'Training time')
-        plt.ylabel(f"Average ensemble loss value")
-        plt.title(f'Ensemble loss vs training time')
-        if self.SaveFig:
-            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Loss')
-        plt.show()
-        plt.close()
+        if self.regions is not None:
+            for (t_start, t_end) in self.regions:
+                mask = self.get_mask(self.train_time_total, t_start, t_end)
+                t = self.train_time_total[mask]
+                ensemble_loss = np.mean(self.loss_array[mask], axis=1)
+                ensemble_loss_uncert = np.std(self.loss_array[mask], axis = 1)/np.sqrt(self.ensemble)
+                plt.figure(figsize=(10,6))
+                plt.plot(t,ensemble_loss)
+                plt.fill_between(t,ensemble_loss+ensemble_loss_uncert,ensemble_loss-ensemble_loss_uncert, alpha = 0.3)
+                for j in range(len(self.NTK_points)):
+                    if t_start <= self.NTK_points[j] <= t_end:
+                    #plt.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                        plt.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+                plt.xlabel(f'Training time')
+                plt.ylabel(f"Average ensemble loss value")
+                plt.title(f'Ensemble loss vs training time')
+                if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Loss_{t_start}_{t_end}')
+                #plt.show()
+                plt.close()
+
+        else:                
+            plt.figure(figsize=(10,6))
+            ensemble_loss = np.mean(self.loss_array, axis=1)
+            ensemble_loss_uncert = np.std(self.loss_array, axis = 1)/np.sqrt(self.ensemble)
+            plt.plot(self.train_time_total,ensemble_loss)
+            plt.fill_between(self.train_time_total,ensemble_loss+ensemble_loss_uncert,ensemble_loss-ensemble_loss_uncert, alpha = 0.3)
+            for j in range(len(self.NTK_points)):
+                #plt.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+                plt.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+            plt.xlabel(f'Training time')
+            plt.ylabel(f"Average ensemble loss value")
+            plt.title(f'Ensemble loss vs training time')
+            if self.SaveFig:
+                    plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Loss')
+            #plt.show()
+            plt.close()
 
         """Plotting Performance"""
         #Need to include training points here
@@ -721,8 +1013,14 @@ class Trial():
             plt.legend()
             if self.SaveFig:
                 plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Performance{k+1}')
-            plt.show()
+            #plt.show()
             plt.close() 
+
+
+
+    def get_mask(self, time_array, time_start,time_end):
+        return (time_array >= time_start) & (time_array <= time_end)
+
     def run_no_plot(self):
         self.save_data()
         for j in range(self.ensemble):
@@ -761,6 +1059,15 @@ if __name__ == "__main__":
     parser.add_argument('--Filename', type = str, help='Determines the file to save data to', default= 'Unsorted')
     args = parser.parse_args()
 
+    regions = [ (0,1),
+               (1,10),
+               (10,20),
+                (20,100),
+               (100,140),
+               (140,180)
+    ]
+
+
     trial = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,args.STD,args.EnsembleNum,args.Performances,
-                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig)
+                  args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig,regions)
     trial.run_plot()
