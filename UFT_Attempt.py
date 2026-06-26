@@ -274,6 +274,8 @@ class Trial():
         self.linear = linear
         self.e_amount = eval_amount
 
+        # self.onnx_filename = onnx_filename
+
         # self.snapshot_array = np.geomspace(1,self.epochs,self.performances).astype(int)
         self.snapshot_array = np.geomspace(1, self.epochs - 1, self.performances).astype(int)
         self.step = int(self.epochs/self.performances)
@@ -419,6 +421,23 @@ class Trial():
                 for i, layer in enumerate(self.model.hidden_layers):
                     self.hooks.append(layer.register_forward_hook(make_hook(i)))
                 self.hooks.append(self.model.output_layer.register_forward_hook(make_hook(len(self.model.hidden_layers))))
+            
+
+
+            """Exporting the model to an onnx format
+            Recall that doing so runs a tracer through the model (to properly assess the architecture)
+            As such, we NEED to remove the hooks
+            We do not however need to place in torch.no_grad() since we are only running a tracer there is no backwards call or updating of the loss landscape
+            """
+            # if j ==0 and epoch ==100:
+            #     #Clear the hooks
+            #     remove_hooks(self.hooks)
+            #     self.export_onnx()
+            #     for i, layer in enumerate(self.model.hidden_layers):
+            #         self.hooks.append(layer.register_forward_hook(make_hook(i)))
+            #     self.hooks.append(self.model.output_layer.register_forward_hook(make_hook(len(self.model.hidden_layers))))
+            
+            
             
             """Start of training loop"""
             self.model.train()
@@ -645,7 +664,18 @@ class Trial():
         df = pd.DataFrame(params)
         df.to_csv(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Params', index = False)
     
-    
+    def export_onnx(self):
+        """Exports the model to an onnx file"""
+
+        inst_input = torch.randn((1,1)).double() 
+        """Since torch.export will run a tracer through the model, it does not actually matter what the input data is
+        To make it as simple as possible, just using a 1X1 torch tensor
+        """
+        onnx_program = torch.onnx.export(self.model,inst_input)
+        onnx_program.save(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\MLP_model.onnx')
+        print(f"The model has been exported to an onnx file")
+
+
     
     def make_plots_regions(self):
         """Chi plots"""
@@ -1162,6 +1192,8 @@ if __name__ == "__main__":
     parser.add_argument('--Filename', type = str, help='Determines the file to save data to', default= 'Unsorted')
     parser.add_argument('--Linear', type = bool, help = 'Determines whether to run as a linear model', default = False)
     parser.add_argument('--EvalAmount', type = int, help = 'Determines the number of eigenvalues/eigenvectors of interest', default = 5)
+    parser.add_argument('--onnx_filename', type = str, help='Determines the filename for the onnx data', default= 'onnx_unsorted')
+
     args = parser.parse_args()
 
     # regions = [ (0,1),
