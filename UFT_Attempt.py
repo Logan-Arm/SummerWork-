@@ -20,34 +20,37 @@ X = torch.linspace(-4*m.pi,4*m.pi,20).view(-1,1).type(torch.DoubleTensor)
 #Used torch.linspace instead of previous torch.arrange as that created 21 points for some reason
 
 
-Y = torch.sin(X.squeeze()) #Can just use torch math functions for the function
+# Y = torch.sin(X.squeeze()) #Can just use torch math functions for the function
 
-#Re-attempting using sinh
-#Y = torch.sinh(X.squeeze())
-
-
+# #Re-attempting using sinh
+# #Y = torch.sinh(X.squeeze())
 
 
-X_train,X_test,Y_train,Y_test = train_test_split(X,Y, test_size= 0.2, random_state=42) #Splits the data into 80% training 20% test
-sorted_indices = X_test.squeeze().argsort()
-X_test_sorted = X_test[sorted_indices]
-Y_test_sorted = Y_test[sorted_indices]
-print(f'X_train = {X_train.squeeze()}')
 
 
-Test_sorted_indices = X_train.squeeze().argsort()
-X_train_sorted = X_train[Test_sorted_indices]
-Y_train_sorted = Y_train[Test_sorted_indices]
+# X_train,X_test,Y_train,Y_test = train_test_split(X,Y, test_size= 0.2, random_state=42) #Splits the data into 80% training 20% test
+# sorted_indices = X_test.squeeze().argsort()
+# X_test_sorted = X_test[sorted_indices]
+# Y_test_sorted = Y_test[sorted_indices]
+# print(f'X_train = {X_train.squeeze()}')
+
+
+# Test_sorted_indices = X_train.squeeze().argsort()
+# X_train_sorted = X_train[Test_sorted_indices]
+# Y_train_sorted = Y_train[Test_sorted_indices]
+
+
+X_train_sorted = torch.linspace(-1,1,16).view(-1,1).type(torch.DoubleTensor)
+Y_train_stretch = torch.multiply(X_train_sorted, 4*m.pi)
+Y_train_sorted = torch.sin(Y_train_stretch.squeeze())
+
+
 # print(f'Initial is{Y_test_sorted }' )
 # Y_test_sorted=torch.sin(X_test_sorted.squeeze())
 # print(f'Final is{Y_test_sorted }' )
 
-
-
-#Testing continuous line instead of 4 individual points
-X_eval = torch.linspace(-4*m.pi, 4*m.pi, 200).view(-1,1).type(torch.DoubleTensor)
-Y_eval = torch.sin(X_eval.squeeze())
-
+X_eval = torch.linspace(-1, 1, 200).view(-1, 1).type(torch.DoubleTensor)
+Y_eval = torch.sin(torch.multiply(X_eval, 4*m.pi).squeeze())
 
 
 #Re-attempting using sinh
@@ -252,7 +255,7 @@ class MultiLayerNet_Linear(nn.Module): #nn.module is the base class for all neur
 class Trial():
     def __init__(self, input,output,width,depth,lr,epochs,STD,ensemblenum,performances,bootstraps,
                  alignmentint,X_train,Y_train,x_test,y_test,filename, SaveFig, regions, linear, eval_amount,
-                 performance_times):
+                 performance_times, phi_target):
         self.input = input
         self.output = output
         self.width = width
@@ -274,6 +277,7 @@ class Trial():
         self.regions = regions
         self.linear = linear
         self.e_amount = eval_amount
+        self.p_target = phi_target
 
         # self.onnx_filename = onnx_filename
 
@@ -319,6 +323,15 @@ class Trial():
         self.eval2_deriv = np.zeros((self.ensemble, self.epochs//self.alignmentint))
         self.eval3_deriv = np.zeros((self.ensemble, self.epochs//self.alignmentint))
 
+
+        """An array to hold the times where all layer's phi> target phi"""
+        self.phi_target_time_layer = []
+
+        """An array to hold the time where neurons in a specific layer are > target phi
+        Note we have excluded the final layer, as it only has one layer, so only one value
+        """
+        self.phi_target_time_neuron = np.zeros((self.numlayer-1, self.width)) 
+
     def calc_NTK_data(self,epoch,j):
         """Calculates the NTk for ntk alignment data or time = 0 NTK calculations
         Calculates the appropriate number of eigenvalues and eigenvectors from self.e_amount
@@ -355,6 +368,25 @@ class Trial():
         self.eval1_rateofchange[j,epoch//self.alignmentint] = np.abs(self.selected_evals[0] - self.eval1_prev)/(self.eval1_prev)
         self.eval2_rateofchange[j,epoch//self.alignmentint] = np.abs(self.selected_evals[1] - self.eval2_prev)/(self.eval2_prev)
         self.eval3_rateofchange[j,epoch//self.alignmentint] = np.abs(self.selected_evals[2] - self.eval3_prev)/(self.eval3_prev)
+
+
+
+    def loss_track(self,j):
+        if self.linear == False:
+            self.model = MultiLayerNet(self.input,self.depth,self.width,self.output,self.std).double()
+        else:
+            self.model = MultiLayerNet_Linear(self.input,self.depth,self.width,self.output,self.std).double()
+        optimiser  = torch.optim.SGD(self.model.parameters(), lr = self.lr)
+        for epoch in range(self.epochs):
+            """Start of training loop"""
+            self.model.train()
+            y_pred = self.model(self.x_train)
+            loss = criterion(y_pred.squeeze(),self.y_train)
+            loss.backward()
+            optimiser.step()
+            optimiser.zero_grad()
+            self.loss_array[epoch, j]=loss.item()
+            """End of training loop"""
 
 
     def train_model(self,j):
@@ -543,6 +575,68 @@ class Trial():
             #now need to take mean over remaining dimensions
             self.phi_sq[k] = (np.mean(ensemble_mean, axis = (1,2)))
 
+    def compute_phi_neuron(self):
+        self.phi_neuron = {i:[] for i in range(self.numlayer)}
+        #self.phi_sq_uncert = {i:[] for i in range(self.numlayer)}
+        for k in range(self.numlayer):
+            stacked_ensemble = np.stack(self.phi[k], axis =0) #Dimensionality [replica, epoch, batch, neuron]
+            stacked_ensemble = np.abs(stacked_ensemble) #Made it absolute value here
+            ensemble_mean = np.mean(stacked_ensemble, axis =0) #Dim is [epoch, batch, neuron]
+            #now need to take mean over remaining dimensions
+            self.phi_neuron[k] = (np.mean(ensemble_mean, axis = 1)) #We are left with a list of dim [epoch, neuron]
+
+
+    def calc_linear_regime_end(self):
+        """Since we are using tanh activation, and tanh(x) ~x for  x^2 <1/3, the model behaves much like a linear model would up until pre-activations 
+        reach a significant enough value.  This function attempts to track that, by figuring out where and when all phi values for each neuron is greater >=
+        a specified target value
+
+        Recall that self.phi_neuron is a dictionary of lists, where each list corresponds to a layer
+        Each list itself is composed of a 2d array of size [epoch,neuron]
+        """
+        #Last layer has only one neuron, hence the -1, need to treat it specially
+        for z in range(len(self.phi_neuron)-1): #Access specific layer
+            inst_layer_list = np.abs(self.phi_neuron[z]) #Want absolute value
+            print(f"Layer {z}: shape = {inst_layer_list.shape}, min = {inst_layer_list.min()}, max = {inst_layer_list.max()}")
+            for k in range(len(inst_layer_list[0,:])): #Access specific neuron
+                """Grabs the zth dictionary element (layer), and the kth neuron, leaving a list of epochs and corresponding neuron phi values"""
+                inst_neuron_list = inst_layer_list[:,k] #Sliced it so that we have all epochs and then the neuron value at that epoch
+                print(f"Layer {z} neuron {k} has a min of {np.min(inst_neuron_list)}, and a max of {np.max(inst_neuron_list)}")
+                
+                # """Create a printout and a break if there are no values greater than the target"""
+                # if not (np.any(inst_neuron_list, where= inst_neuron_list >=self.p_target)):
+                #     print(f"There are no elements of layer{z}, neuron{k}'s pre-activations which are larger than the target value")
+                #     break
+
+
+                times = np.where(inst_neuron_list >= self.p_target)[0]#Grab the smallest time where it is larger than the target
+                if len(times)==0:
+                    print(f"There are no elements of layer{z}, neuron{k}'s pre-activations which are larger than the target value")
+                    self.phi_target_time_neuron[z,k] = np.nan
+                    #break
+                else:                    
+                    self.phi_target_time_neuron[z,k] = times[0]
+            """Now we need to add the time when the whole layer is greater than the target"""
+            self.phi_target_time_layer.append(np.nanmax(self.phi_target_time_neuron[z,:])) #Switched to nanmax  
+
+        """Treat last layer specially"""
+        final_layer_list = np.abs(self.phi_neuron[len(self.phi_neuron)-1])
+        print(f"The maximum pre-activation value of the final layer is {np.max(final_layer_list)}")
+        print(f"The minimum pre-activation value of the final layer is {np.min(final_layer_list)}")
+        #Sanity checker
+        #print(f"The length of the final_layer_list is {len(final_layer_list)}")
+        
+        time = np.where(final_layer_list >= self.p_target)[0]
+        if len(time)==0:
+            print(f"There are no elements of layer{self.numlayer} pre-activations which are larger than the target value")
+        
+        else:
+            self.phi_target_time_layer.append(time[0])
+
+        self.phi_target_times = np.array(self.phi_target_time_layer) *self.lr
+
+    
+
     def compute_NTK_pts(self):
         self.NTK_points = 1/self.mean_eigenvals
         self.NTK_point_uncert = self.mean_eigenvals_std/(self.mean_eigenvals**2)
@@ -559,6 +653,8 @@ class Trial():
         self.NTK_points = self.NTK_points[self.NTK_points >0]
 
     def compute_preactivation_rate(self):
+        """Calculates phi dot"""
+
         self.ensemble_means = {i:[] for i in range(self.numlayer)}
         self.ensemble_uncertainty = {i:[] for i in range(self.numlayer)}
         """Sanity checker"""
@@ -662,6 +758,8 @@ class Trial():
         self.compute_eigvals_zero()
         self.compute_NTK_pts()
         self.compute_phi_sq()
+        self.compute_phi_neuron()
+        self.calc_linear_regime_end()
         self.compute_preactivation_rate()
         self.compute_chi()
         self.compute_alignments()
@@ -684,6 +782,7 @@ class Trial():
             'Performances': [self.performances],
             'Bootstraps': [self.bootstraps],
             'AlignmentInterval': [self.alignmentint],
+            'TargetPhi': [self.p_target]
         }
         df = pd.DataFrame(params)
         df.to_csv(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Params', index = False)
@@ -699,9 +798,99 @@ class Trial():
         onnx_program.save(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\MLP_model.onnx')
         print(f"The model has been exported to an onnx file")
 
+    def plot_neuron_preactivations_regions(self):
+        cmap = plt.cm.tab10
+
+        theta_threshold = np.linspace(0,2*m.pi,150) #Smooth amount of radians
+
+        for (t_start, t_end) in self.regions:
+            time_of_int =t_start/2 + t_end/2 #Grabs the midpoint of the region
+            epoch_id = int(time_of_int/self.lr) #Converts it back into the epochs
+
+            self.N = sum(self.model.layer_widths) #Sums the model's widths so we know how many neurons we have
+            angles = np.linspace(0, 2*m.pi, self.N, endpoint= False) #Creates self.N linearly spaced points between 0 and 2pi
+            #Need endpoint = false to prevent overlap of points on 0 / 2pi
+ 
+            fig = plt.figure(figsize=(10,6))
+            ax = fig.add_subplot(111,projection= 'polar')
+            
+
+            magnitudes = []
+            layer_ids = []
+
+            start = 0
+
+            for layer_idx, widths in enumerate(self.model.layer_widths):
+                values = self.phi_neuron[layer_idx][epoch_id,:] 
+                """Grabs the layer id element of the self.phi_neurons dictionary, 
+                and then grabs all the neuron's activations corresponding to the particular time of interest"""
+                magnitudes.extend(values) #Adds all 10 (or 1) values to the magnitudes list
+                layer_ids.extend([layer_idx]*widths) #Correctly populates the layer_ids list with the necessary labels
+
+            #Plotting actual points
+            for layer_idx, widths in enumerate(self.model.layer_widths):
+                layer_angles = angles[start:start+widths]
+                layer_mags = magnitudes[start:start+widths]
+                ax.scatter(layer_angles, layer_mags, color=cmap(layer_idx / max(len(self.model.layer_widths)-1, 1)),
+                s=40, label=f'Layer {layer_idx}')
+                start += widths
+            # ax.scatter(angles, magnitudes, c=colors, s=40) #s just corresponds to the points size
+
+            #Plotting phi threshold
+            ax.plot(theta_threshold,np.full_like(theta_threshold,self.p_target), linestyle = 'dotted', color = 'black', alpha = 0.6)
+            ax.set_xticks([]) #removes angle markers
+            ax.set_title(f"Pre-activation of neurons at time {epoch_id}")
+            ax.legend()
+            if self.SaveFig:
+                fig.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\RadialPhi_{epoch_id}')
+            plt.close(fig)
+
+
+    def plot_neuron_preactivations(self,time):
+        cmap = plt.cm.tab10
+
+        theta_threshold = np.linspace(0,2*m.pi,150) #Smooth amount of radians
+
+        time_of_int =time 
+        epoch_id = int(time_of_int/self.lr) #Converts it back into the epochs
+
+        self.N = sum(self.model.layer_widths) #Sums the model's widths so we know how many neurons we have
+        angles = np.linspace(0, 2*m.pi, self.N, endpoint= False) #Creates self.N linearly spaced points between 0 and 2pi
+        #Need endpoint = false to prevent overlap of points on 0 / 2pi
+
+        fig = plt.figure(figsize=(10,6))
+        ax = fig.add_subplot(111,projection= 'polar')
+        start = 0
+        magnitudes = []
+        layer_ids = []
+        for layer_idx, widths in enumerate(self.model.layer_widths):
+            values = self.phi_neuron[layer_idx][epoch_id,:] 
+            """Grabs the layer id element of the self.phi_neurons dictionary, 
+            and then grabs all the neuron's activations corresponding to the particular time of interest"""
+            magnitudes.extend(values) #Adds all 10 (or 1) values to the magnitudes list
+            layer_ids.extend([layer_idx]*widths) #Correctly populates the layer_ids list with the necessary labels
+        
+        #Plotting actual points
+        # ax.scatter(angles, magnitudes, c=colors, s=40) #s just corresponds to the points size
+        for layer_idx, widths in enumerate(self.model.layer_widths):
+            layer_angles = angles[start:start+widths]
+            layer_mags = magnitudes[start:start+widths]
+            ax.scatter(layer_angles, layer_mags, color=cmap(layer_idx / max(len(self.model.layer_widths)-1, 1)),
+            s=40, label=f'Layer {layer_idx}')
+            start += widths
+        #Plotting phi threshold
+        ax.plot(theta_threshold,np.full_like(theta_threshold,self.p_target), linestyle = 'dotted', color = 'black', alpha = 0.6)
+        ax.set_title(f"Pre-activation of neurons at time {epoch_id}")
+        ax.set_xticks([]) #removes angle markers
+
+        ax.legend()
+        if self.SaveFig:
+            fig.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\RadialPhi_{epoch_id}')
+        plt.close(fig)
 
     
     def make_plots_regions(self):
+        phi_colors = plt.cm.tab10(np.linspace(0, 1, len(self.phi_target_times)))
         """Chi plots"""
         # for (t_start, t_end) in self.regions:
         #     mask = self.get_mask(self.train_time_rate, t_start, t_end)
@@ -802,6 +991,10 @@ class Trial():
                     #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
                     ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
                     #Axvspan expects a single point, cannot use an array, hence need the for loop    
+            #Adding points where phi exceeds the threshhold:
+            for j in range(len(self.phi_target_times)):
+                if t_start<=self.phi_target_times[j] <= t_end:
+                    ax.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")
             ax.set_xlabel('Training Time')
             ax.set_ylabel('Pre-Activation Derivative')
             ax.set_title('Finite Difference of Layer Pre-Activations')
@@ -828,7 +1021,12 @@ class Trial():
                 if t_start <= self.NTK_points[j] <= t_end:
                     #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
                     ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
-                    #Axvspan expects a single point, cannot use an array, hence need the for loop    
+                    #Axvspan expects a single point, cannot use an array, hence need the for loop 
+
+            #Adding where phi crosses the target range
+            for j in range(len(self.phi_target_times)):
+                if t_start<=self.phi_target_times[j] <= t_end:
+                    ax.axvline(self.phi_target_times[j],color=phi_colors[j],  alpha = 0.3, label = f"Layer {j+1}'s phi")   
             ax.set_xlabel('Training Time')
             ax.set_ylabel('Pre-Activation Derivative')
             ax.set_title('Finite Difference of Layer Pre-Activations')
@@ -867,19 +1065,24 @@ class Trial():
 
 
         """NTK Alignment Value"""
-        # for (t_start, t_end) in self.regions:
-        #     mask = self.get_mask(self.train_time_alignment, t_start, t_end)
-        #     t = self.train_time_alignment[mask]
-        #     plt.figure(figsize=(8,6))
-        #     plt.plot(t,self.alignment_mean[mask])
-        #     plt.fill_between(t, (self.alignment_mean +self.alignment_uncert)[mask], (self.alignment_mean-self.alignment_uncert)[mask], alpha = 0.3)
-        #     plt.xlabel(f'Training time')
-        #     plt.ylabel(f'Alignment')
-        #     plt.title(f'Alignment of the NTK vs Training Time')
-        #     if self.SaveFig:
-        #         plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment_{t_start}_{t_end}')
-        #     #plt.show()
-        #     plt.close()
+        for (t_start, t_end) in self.regions:
+            mask = self.get_mask(self.train_time_alignment, t_start, t_end)
+            t = self.train_time_alignment[mask]
+            plt.figure(figsize=(8,6))
+            plt.plot(t,self.alignment_mean[mask])
+            plt.fill_between(t, (self.alignment_mean +self.alignment_uncert)[mask], (self.alignment_mean-self.alignment_uncert)[mask], alpha = 0.3)
+            #Adding linear domain times 
+            for j in range(len(self.phi_target_times)):
+                if t_start<=self.phi_target_times[j] <= t_end:
+                    plt.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")
+            plt.legend()
+            plt.xlabel(f'Training time')
+            plt.ylabel(f'Alignment')
+            plt.title(f'Alignment of the NTK vs Training Time')
+            if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment_{t_start}_{t_end}')
+            #plt.show()
+            plt.close()
 
         """Eigenvector Alignment"""
         # for (t_start, t_end) in self.regions:
@@ -910,6 +1113,12 @@ class Trial():
                 plt.plot(t,self.eval_5_array[:,k][mask], label = f"Eigenvalue {k+1}")
                 plt.fill_between(t, (self.eval_5_array[:,k] + self.eval_5_uncert[:,k])[mask],(self.eval_5_array[:,k] - self.eval_5_uncert[:,k])[mask]
                                     , alpha = 0.3 )
+            
+
+            #Adding linear domain times 
+            for j in range(len(self.phi_target_times)):
+                if t_start<=self.phi_target_times[j] <= t_end:
+                    plt.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")
             plt.xlabel(f"Training time")
             plt.ylabel(f" Eigenvalue")
             plt.title(f"5 Largest Eigenvalues vs Training Time")
@@ -951,6 +1160,11 @@ class Trial():
                 if t_start <= self.NTK_points[j] <= t_end:
                 #plt.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
                     plt.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+
+
+            for j in range(len(self.phi_target_times)):
+                if t_start<=self.phi_target_times[j] <= t_end:
+                    plt.axvline(self.phi_target_times[j], color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")
             plt.xlabel(f'Training time')
             plt.ylabel(f"Average ensemble loss value")
             plt.title(f'Ensemble loss vs training time')
@@ -963,14 +1177,17 @@ class Trial():
          #Need to include training points here
         mean_ensemble_val = np.mean(self.performance_array,axis=1)
         ensemble_uncert = np.std(self.performance_array,axis = 1)/np.sqrt(self.ensemble)
-        x_vals = self.x_test.squeeze().numpy()
+        # x_vals = self.x_test.squeeze().numpy()
+        x_vals = (self.x_test.squeeze() * 4*m.pi).numpy()
+        x_train_vals = (self.x_train.squeeze() * 4*m.pi).numpy()
         for k in range(self.performance_array.shape[0]):
             # epoch_value = (k+1)*self.step
             epoch_value = self.snapshot_array[k] *self.lr
             plt.figure(figsize=(8,6))
             plt.plot(x_vals, mean_ensemble_val[k,:], label = f'Predicted Values')
             plt.plot(x_vals,self.y_test.numpy(), label = f'True Values')
-            plt.scatter(self.x_train,self.y_train,label = "Training points")
+            # plt.scatter(self.x_train,self.y_train,label = "Training points")
+            plt.scatter(x_train_vals, self.y_train, label="Training points")
             plt.fill_between(x_vals, mean_ensemble_val[k,:]+ensemble_uncert[k,:],mean_ensemble_val[k,:]-ensemble_uncert[k,:],color = 'blue', alpha = 0.3)
             #plt.fill_between is finicky, needs inputs to be explicitly 1 dimensional, hence the X_test_sorted.squeeze().numpy()
             plt.xlabel(f'X')
@@ -982,10 +1199,23 @@ class Trial():
             #plt.show()
             plt.close() 
 
-
+    def plot_loss(self):
+        plt.figure(figsize=(10,6))
+        ensemble_loss = np.mean(self.loss_array, axis=1)
+        ensemble_loss_uncert = np.std(self.loss_array, axis = 1)/np.sqrt(self.ensemble)
+        plt.plot(self.train_time_total,ensemble_loss)
+        plt.fill_between(self.train_time_total,ensemble_loss+ensemble_loss_uncert,ensemble_loss-ensemble_loss_uncert, alpha = 0.3)   
+        plt.xlabel(f'Training time')
+        plt.ylabel(f"Average ensemble loss value")
+        plt.title(f'Ensemble loss vs training time')
+        if self.SaveFig:
+                plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\Loss')
+        #plt.show()
+        plt.close()
 
     def make_plots(self):
 
+        phi_colors = plt.cm.tab10(np.linspace(0, 1, len(self.phi_target_times)))
         # """Chi plots"""
         # fig, ax = plt.subplots(figsize=(10, 6)) 
         # for k in range(len(self.chi_array)): 
@@ -1066,7 +1296,10 @@ class Trial():
         for j in range(len(self.NTK_points)):
             #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
             ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
-            #Axvspan expects a single point, cannot use an array, hence need the for loop    
+            #Axvspan expects a single point, cannot use an array, hence need the for loop 
+
+        for j in range(len(self.phi_target_times)):
+            ax.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")   
         ax.set_xlabel('Training Time')
         ax.set_ylabel('Pre-Activation Derivative')
         ax.set_title('Finite Difference of Layer Pre-Activations')
@@ -1090,6 +1323,10 @@ class Trial():
             #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
             ax.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
             #Axvspan expects a single point, cannot use an array, hence need the for loop    
+
+
+        for j in range(len(self.phi_target_times)):
+            ax.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")   
         ax.set_xlabel('Training Time')
         ax.set_ylabel('Pre-Activation Derivative')
         ax.set_title('Finite Difference of Layer Pre-Activations')
@@ -1125,17 +1362,30 @@ class Trial():
         plt.close()
 
 
-        # """NTK alignment value"""
-        # plt.figure(figsize=(8,6))
-        # plt.plot(self.train_time_alignment,self.alignment_mean)
-        # plt.fill_between(self.train_time_alignment, self.alignment_mean +self.alignment_uncert, self.alignment_mean-self.alignment_uncert, alpha = 0.3)
-        # plt.xlabel(f'Training time')
-        # plt.ylabel(f'Alignment')
-        # plt.title(f'Alignment of the NTK vs Training Time')
-        # if self.SaveFig:
-        #     plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment')
-        # #plt.show()
-        # plt.close()
+        """NTK alignment value"""
+        plt.figure(figsize=(8,6))
+        plt.plot(self.train_time_alignment,self.alignment_mean)
+        
+        plt.fill_between(self.train_time_alignment, self.alignment_mean +self.alignment_uncert, self.alignment_mean-self.alignment_uncert, alpha = 0.3)
+        for k in range(len(self.ensemble_means)): 
+            mean = self.phi_sq[k]
+            #std = ensemble_uncertainty[k]
+            plt.plot(self.train_time_total, mean, label=f'Layer {k+1}') #Convention is to use layer 0 as input, so need to shift everything up by 1
+            #ax.fill_between(epochs_axis, mean - std, mean + std, alpha=0.3)
+
+        #Adding important regions to plot
+        for j in range(len(self.NTK_points)):
+            #ax.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
+            plt.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+            #Axvspan expects a single point, cannot use an array, hence need the for loop    
+        plt.xlabel(f'Training time')
+        plt.ylabel(f'Alignment')
+        plt.legend()
+        plt.title(f'Alignment of the NTK vs Training Time')
+        if self.SaveFig:
+            plt.savefig(fr'C:\Users\Logan\Downloads\SummerWork\{self.Filename}\NTKAlignment')
+        #plt.show()
+        plt.close()
 
         # """Plotting the eigenvector alignment value"""
         # plt.figure(figsize=(8,6))
@@ -1157,6 +1407,10 @@ class Trial():
         for k in range(self.evec_alignment_mean.shape[1]):
             plt.plot(self.train_time_alignment,self.eval_5_array[:,k], label = f"Eigenvalue {k+1}")
             plt.fill_between(self.train_time_alignment, self.eval_5_array[:,k] + self.eval_5_uncert[:,k],self.eval_5_array[:,k] - self.eval_5_uncert[:,k], alpha = 0.3 )
+
+
+        for j in range(len(self.phi_target_times)):
+            plt.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")           
         plt.xlabel(f"Training time")
         plt.ylabel(f" Eigenvalue")
         plt.title(f"5 Largest Eigenvalues vs Training Time")
@@ -1192,6 +1446,8 @@ class Trial():
         for j in range(len(self.NTK_points)):
             #plt.axvspan(self.NTK_points[j] - self.NTK_point_uncert[j], self.NTK_points[j] + self.NTK_point_uncert[j], color='purple', alpha=0.3)
             plt.axvline(self.NTK_points[j], color = 'purple', alpha = 0.3)
+        for j in range(len(self.phi_target_times)):
+            plt.axvline(self.phi_target_times[j],color=phi_colors[j], alpha = 0.3, label = f"Layer {j+1}'s phi")   
         plt.xlabel(f'Training time')
         plt.ylabel(f"Average ensemble loss value")
         plt.title(f'Ensemble loss vs training time')
@@ -1241,12 +1497,32 @@ class Trial():
             self.train_model(j)
             print(f"Completed replica number {j}")
         self.compute_data()
+        # self.export_onnx()
         if self.regions is not None:
             self.make_plots_regions()
+            self.plot_neuron_preactivations_regions()
         else:
             self.make_plots()
-    
+            self.plot_neuron_preactivations(self.epochs) #Just do last time
 
+    def run_plots_total(self):
+        self.save_data()
+        for j in range(self.ensemble):
+            self.train_model(j)
+            print(f"Completed replica number {j}")
+        self.compute_data()
+        if self.regions is not None:
+            self.make_plots_regions()
+            self.make_plots()
+        else:
+            self.make_plots()        
+
+    def investigations(self):
+        self.save_data()
+        for j in range(self.ensemble):
+            self.loss_track(j)
+            print(f"Completed replica number {j}")
+        self.plot_loss()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1255,12 +1531,9 @@ if __name__ == "__main__":
     parser.add_argument('--HiddenLayerWidth', type = int, help='Defines how wide we want the hidden layers to be, i.e., how many nodes is ' \
     'the initial data mapped onto when going from initial --> HiddenLayer1', default = 10)
     parser.add_argument('--HiddenLayerDepth', type = int, help='Defines how many hidden layers we want', default = 3)
-    parser.add_argument('--lr', type = float, help='Determines the learning rate for the model', default = 0.05)
-    #Later add a seed function to change what f(x) is for each case
-    parser.add_argument('--WidthModifyer', type = float, help='Modifyer of the width of each hidden layer, for example' \
-    'say our initial width is 10, and we set our widthmodifyer = 0.1, then the width of each hidden layer will decrease by 10% ', default=0.3)
+    parser.add_argument('--lr', type = float, help='Determines the learning rate for the model', default = 0.01)
     parser.add_argument('--Epochs',type=int, help='Determines the number of training epochs', default = 100000)
-    parser.add_argument('--STD',type=float, help='Determines the standard deviation (width) of the normal distribution for the hidden layers weights', default = 0.1)
+    parser.add_argument('--STD',type=float, help='Determines the standard deviation (width) of the normal distribution for the hidden layers weights', default = 0.2)
     parser.add_argument('--EnsembleNum', type = int, help= ' Determines the number of models to create for the purposes of ensemble averages', default= 10)
     parser.add_argument('--Performances', type = int, help='Determines the number of printouts of model performance desired', default=4)
     parser.add_argument('--Bootstraps', type= int, help='Determines the number of bootstraps to calculate for error propagation', default=100)
@@ -1270,28 +1543,36 @@ if __name__ == "__main__":
     parser.add_argument('--Linear', type = bool, help = 'Determines whether to run as a linear model', default = False)
     parser.add_argument('--EvalAmount', type = int, help = 'Determines the number of eigenvalues/eigenvectors of interest', default = 5)
     parser.add_argument('--onnx_filename', type = str, help='Determines the filename for the onnx data', default= 'onnx_unsorted')
+    parser.add_argument('--PhiTarget', type = float, help='Determines the target value for when the model is outside the linear regime', default=0.2)
 
     args = parser.parse_args()
-
+###############################################################
     # regions = [ (0,1),
-    #            (1,10),
-    #            (10,140),
-    #            (140,250),
-    #            (250,310),
-    #            (310,400),
-    #            (400,600),
-    #            (600,800)
-
+    #            (1500,1750),
+    #            (1750,2000),
+    #            (2000,2250),
+    #            (2250,2500),
+    #            (2500,2750),
+    #            (2750,3000),
+    #            (0,3000)
     # ]
-    step = 10
-    regions = [(t, t + step) for t in np.arange(300, 400, step)]
+    step = 25
+    regions = [(t, t + step) for t in np.arange(600, 800, step)]
 
-    # performances_array = np.arange(30000,50000,1000)
+    # # performances_array = np.arange(0,300000,30000) np.arange does not include endpoint, not always best
     performances_array = np.arange(60000,80000,2000)
-
+    # performances_array =np.linspace(0,300000, 15)
 
 
     trial = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,args.STD,args.EnsembleNum,args.Performances,
                   args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig,regions,args.Linear, args.EvalAmount,
-                  performances_array)
+                  performances_array, args.PhiTarget)
     trial.run_plot()
+
+
+###############################################################
+    # trial = Trial(args.InputSize, args.OutputSize,args.HiddenLayerWidth,args.HiddenLayerDepth,args.lr,args.Epochs,args.STD,args.EnsembleNum,args.Performances,
+    #               args.Bootstraps,args.AlignmentInterval,X_train_sorted,Y_train_sorted,X_eval,Y_eval,args.Filename,args.SaveFig,None,args.Linear, args.EvalAmount,
+    #               None, args.PhiTarget)
+    # trial.investigations()
+###############################################################
